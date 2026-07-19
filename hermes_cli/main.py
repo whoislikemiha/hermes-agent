@@ -309,6 +309,7 @@ from hermes_cli.subcommands.uninstall import build_uninstall_parser
 from hermes_cli.subcommands.dashboard import build_dashboard_parser
 from hermes_cli.subcommands.gui import build_gui_parser
 from hermes_cli.subcommands.logs import build_logs_parser
+from hermes_cli.subcommands.events import build_events_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.memory import build_memory_parser
 from hermes_cli.subcommands.acp import build_acp_parser
@@ -11479,6 +11480,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "import",
         "completion",
         "logs",
+        "events",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
 
@@ -12705,7 +12707,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
-        "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "events", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
@@ -15037,6 +15039,8 @@ def main():
     # logs command  (parser built in hermes_cli/subcommands/logs.py)
     # =========================================================================
     build_logs_parser(subparsers, cmd_logs=cmd_logs)
+
+    build_events_parser(subparsers)
 
     # =========================================================================
     # prompt-size command  (parser built in hermes_cli/subcommands/prompt_size.py)

@@ -2762,6 +2762,12 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         from tools.process_registry import format_process_notification
         return format_process_notification(evt)
 
+    if evt_type == "external_event":
+        payload = json.dumps(
+            evt.get("payload", {}), ensure_ascii=False, separators=(",", ":")
+        )
+        return f"[IMPORTANT: External event received:\n{payload}]"
+
     return None
 
 
@@ -2785,7 +2791,7 @@ def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
         evt_type = evt.get("type", "completion")
         if evt_type in {"watch_match", "watch_disabled"}:
             watch_events.append(evt)
-        elif evt_type == "async_delegation":
+        elif evt_type in {"async_delegation", "external_event"}:
             requeue.append(evt)
         # else: process completion events are handled by the watcher task
     for evt in requeue:
@@ -16299,6 +16305,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapters = getattr(self, "adapters", None) or {}
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+        _token_file = ""
+        if _async_delivery and context.session_id and context.session_key:
+            try:
+                from external_events import issue_session_capability
+
+                _token_file = str(
+                    issue_session_capability(
+                        session_id=context.session_id,
+                        session_key=context.session_key,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Could not issue external-event capability: %s", exc)
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -16307,9 +16326,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            session_id=context.session_id,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            external_events_token_file=_token_file,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -16841,6 +16862,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if evt_type == "async_delegation":
             producer_id = str(evt.get("delegation_id") or "")
             return (evt_type, producer_id, "") if producer_id else None
+        if evt_type == "external_event":
+            producer_id = str(evt.get("event_id") or "")
+            return (evt_type, producer_id, "") if producer_id else None
         if evt_type == "completion":
             producer_id = str(evt.get("session_id") or "")
             started_at = evt.get("started_at")
@@ -16861,24 +16885,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         identity = self._completion_delivery_identity(evt)
         durable_claim_id = ""
-        durable_delegation_id = ""
-        if evt.get("type") == "async_delegation":
-            durable_delegation_id = str(evt.get("delegation_id") or "")
-            if durable_delegation_id:
-                try:
-                    from tools.async_delegation import claim_completion_delivery
+        if evt.get("type") in {"async_delegation", "external_event"}:
+            try:
+                from tools.async_delegation import claim_event_delivery
 
-                    durable_claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
-                    if not claim_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    ):
-                        return None
-                except Exception as exc:
-                    logger.warning(
-                        "Could not claim durable async completion %s: %s",
-                        durable_delegation_id, exc,
-                    )
-                    return False
+                claim = claim_event_delivery(evt, f"gateway:{id(self)}")
+                if claim is None:
+                    return None
+                durable_claim_id = claim
+            except Exception as exc:
+                logger.warning("Could not claim durable completion: %s", exc)
+                return False
         if identity is not None:
             with self._completion_delivery_lock:
                 if (
@@ -16910,16 +16927,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # after adapter acceptance; this gateway keeps no parallel ledger.
             if durable_claim_id:
                 try:
-                    from tools.async_delegation import complete_completion_delivery
+                    from tools.async_delegation import complete_event_delivery
 
-                    complete_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    )
+                    complete_event_delivery(evt, durable_claim_id)
                 except Exception as exc:
-                    logger.warning(
-                        "Could not acknowledge durable async completion %s: %s",
-                        durable_delegation_id, exc,
-                    )
+                    logger.warning("Could not acknowledge durable completion: %s", exc)
             return True
         finally:
             if identity is not None and not accepted:
@@ -16927,11 +16939,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._completion_deliveries_inflight.discard(identity)
             if durable_claim_id and not accepted:
                 try:
-                    from tools.async_delegation import release_completion_delivery
+                    from tools.async_delegation import release_event_delivery
 
-                    release_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    )
+                    release_event_delivery(evt, durable_claim_id)
                 except Exception:
                     logger.debug("Could not release durable completion claim", exc_info=True)
 
@@ -16974,7 +16984,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from tools.process_registry import process_registry as _pr
         while self._running:
             try:
-                # Peek the queue for async-delegation events. We must NOT
+                from tools.async_delegation import discover_pending_completions
+
+                discover_pending_completions(
+                    _pr.completion_queue, completion_type="external_event"
+                )
+                # Peek the queue for durable completion events. We must NOT
                 # consume watch/completion events here (other drains own them),
                 # so requeue anything that isn't ours.
                 requeue = []
@@ -16984,7 +16999,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         evt = _pr.completion_queue.get_nowait()
                     except Exception:
                         break
-                    if evt.get("type") == "async_delegation":
+                    if evt.get("type") in {"async_delegation", "external_event"}:
                         async_events.append(evt)
                     else:
                         requeue.append(evt)

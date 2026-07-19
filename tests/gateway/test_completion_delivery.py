@@ -9,6 +9,7 @@ state (when available) is acknowledged through its authoritative SQLite API.
 import asyncio
 import json
 import queue
+import sqlite3
 from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -18,6 +19,7 @@ import pytest
 from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
+from external_events import issue_session_capability, publish_event
 from tools.process_registry import ProcessRegistry, ProcessSession
 
 
@@ -82,6 +84,19 @@ def _completion_event(*, started_at, session_id="proc_reused"):
         "completion_reason": "exited",
         "output": "done\n",
     }
+
+
+def _publish_external(home, *, session_key, session_id="durable-session", payload=None):
+    capability = issue_session_capability(
+        session_id=session_id,
+        session_key=session_key,
+        profile_home=home,
+    )
+    return publish_event(
+        payload or {"kind": "build.complete"},
+        token_file=str(capability),
+        profile_home=home,
+    )
 
 
 def _stop_after_sleeps(monkeypatch, runner, count):
@@ -273,6 +288,78 @@ def test_async_completion_uses_canonical_origin_routing(monkeypatch, isolated_re
 
     delivered = adapter.handle_message.await_args.args[0]
     assert delivered.source == canonical
+
+
+def test_live_external_publish_is_discovered_and_delivered(monkeypatch, tmp_path, isolated_registry):
+    session_key = "agent:main:telegram:thread:canonical-topic"
+    event_id = _publish_external(tmp_path, session_key=session_key)
+    canonical = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="canonical-chat",
+        chat_type="group",
+        thread_id="canonical-topic",
+    )
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter, origins={session_key: SimpleNamespace(origin=canonical)})
+    _stop_after_sleeps(monkeypatch, runner, count=2)
+
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+
+    delivered = adapter.handle_message.await_args.args[0]
+    assert delivered.internal is True
+    assert delivered.source == canonical
+    assert delivered.metadata == {"gateway_session_id": "durable-session"}
+    assert '"kind":"build.complete"' in delivered.text
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        state = conn.execute(
+            "SELECT delivery_state FROM async_delegations WHERE delegation_id=?",
+            (event_id,),
+        ).fetchone()[0]
+    assert state == "delivered"
+
+
+def test_external_publish_while_down_rehydrates_on_restart(monkeypatch, tmp_path):
+    session_key = "agent:main:telegram:dm:restart-chat"
+    _publish_external(tmp_path, session_key=session_key, payload={"restart": True})
+
+    from tools import process_registry as registry_module
+
+    restarted = registry_module.ProcessRegistry()
+    monkeypatch.setattr(registry_module, "process_registry", restarted)
+    canonical = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="restart-chat",
+        chat_type="dm",
+    )
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter, origins={session_key: SimpleNamespace(origin=canonical)})
+    _stop_after_sleeps(monkeypatch, runner, count=2)
+
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+
+    adapter.handle_message.assert_awaited_once()
+    assert '"restart":true' in adapter.handle_message.await_args.args[0].text
+
+
+def test_external_event_busy_path_preserves_fresh_turn(monkeypatch, tmp_path, isolated_registry):
+    session_key = "agent:main:telegram:dm:busy-chat"
+    _publish_external(tmp_path, session_key=session_key)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="busy-chat",
+        chat_type="dm",
+    )
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter, origins={session_key: SimpleNamespace(origin=source)})
+    _stop_after_sleeps(monkeypatch, runner, count=2)
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+    event = adapter.handle_message.await_args.args[0]
+
+    runner._is_user_authorized = lambda _source: True
+    runner._draining = False
+    runner._adapter_for_source = lambda _source: adapter
+
+    assert asyncio.run(runner._handle_active_session_busy_message(event, session_key)) is False
 
 
 def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch):

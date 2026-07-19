@@ -80,12 +80,13 @@ _MAX_DURABLE_PENDING = 1000
 _DB_LOCK = threading.Lock()
 
 
-def _db_path():
-    return get_hermes_home() / "state.db"
+def _db_path(profile_home=None):
+    home = profile_home if profile_home is not None else get_hermes_home()
+    return home / "state.db"
 
 
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
+def _connect(profile_home=None) -> sqlite3.Connection:
+    path = _db_path(profile_home) if profile_home is not None else _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -108,7 +109,8 @@ def _connect() -> sqlite3.Connection:
             owner_started_at INTEGER,
             task_json TEXT,
             delivery_claim TEXT,
-            delivery_claimed_at REAL
+            delivery_claimed_at REAL,
+            completion_type TEXT NOT NULL DEFAULT 'async_delegation'
         )"""
     )
     columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
@@ -118,6 +120,7 @@ def _connect() -> sqlite3.Connection:
         ("task_json", "TEXT"),
         ("delivery_claim", "TEXT"),
         ("delivery_claimed_at", "REAL"),
+        ("completion_type", "TEXT NOT NULL DEFAULT 'async_delegation'"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
@@ -157,17 +160,19 @@ def _delete_durable_delegation(delegation_id: str) -> None:
         conn.execute("DELETE FROM async_delegations WHERE delegation_id=?", (delegation_id,))
 
 
-def _prune_durable_records() -> None:
-    """Bound terminal history, preferring delivered records for deletion."""
+def _prune_durable_records(profile_home=None) -> None:
+    """Bound delivered terminal history and the separate pending backlog."""
     now = time.time()
     cutoff = now - _DURABLE_RETENTION_SECONDS
-    with _DB_LOCK, _connect() as conn:
+    with _DB_LOCK, _connect(profile_home) as conn:
         conn.execute(
             "DELETE FROM async_delegations WHERE delivery_state='delivered' AND updated_at < ?",
             (cutoff,),
         )
         terminal_count = conn.execute(
-            "SELECT COUNT(*) FROM async_delegations WHERE state NOT IN ('running','finalizing')"
+            """SELECT COUNT(*) FROM async_delegations
+               WHERE state NOT IN ('running','finalizing')
+                 AND delivery_state='delivered'"""
         ).fetchone()[0]
         excess = max(0, terminal_count - _MAX_RETAINED_COMPLETED)
         if excess:
@@ -175,8 +180,8 @@ def _prune_durable_records() -> None:
                 """DELETE FROM async_delegations WHERE delegation_id IN (
                      SELECT delegation_id FROM async_delegations
                      WHERE state NOT IN ('running','finalizing')
-                     ORDER BY CASE delivery_state WHEN 'delivered' THEN 0 ELSE 1 END,
-                              updated_at ASC LIMIT ?
+                       AND delivery_state='delivered'
+                     ORDER BY updated_at ASC LIMIT ?
                    )""",
                 (excess,),
             )
@@ -208,6 +213,42 @@ def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
         )
 
 
+def persist_durable_completion(
+    completion_id: str,
+    event: Dict[str, Any],
+    *,
+    completion_type: str,
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    profile_home=None,
+) -> None:
+    """Persist a terminal event on the shared durable completion ledger."""
+    if not completion_id or not completion_type or not session_key:
+        raise ValueError("A completion id, type, and session key are required")
+    if event.get("type") != completion_type:
+        raise ValueError("Completion type does not match the event payload")
+    now = time.time()
+    with _DB_LOCK, _connect(profile_home) as conn:
+        conn.execute(
+            """INSERT INTO async_delegations
+               (delegation_id, origin_session, parent_session_id, state,
+                dispatched_at, completed_at, updated_at, event_json,
+                delivery_state, delivery_attempts, completion_type)
+               VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, 'pending', 0, ?)""",
+            (
+                completion_id,
+                session_key,
+                parent_session_id,
+                now,
+                now,
+                now,
+                json.dumps(event),
+                completion_type,
+            ),
+        )
+    _prune_durable_records(profile_home)
+
+
 def _note_delivery_attempt(delegation_id: str) -> None:
     with _DB_LOCK, _connect() as conn:
         conn.execute(
@@ -229,7 +270,9 @@ def recover_abandoned_delegations() -> int:
             """SELECT delegation_id, origin_session, origin_ui_session_id,
                       parent_session_id, dispatched_at, owner_pid,
                       owner_started_at, task_json
-               FROM async_delegations WHERE state IN ('running','finalizing')"""
+               FROM async_delegations
+               WHERE completion_type='async_delegation'
+                 AND state IN ('running','finalizing')"""
         ).fetchall()
         for row in rows:
             delegation_id, session_key, origin_ui, parent_id, dispatched_at, pid, started, task_json = row
@@ -279,7 +322,9 @@ def restore_undelivered_completions(target_queue) -> int:
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             """SELECT delegation_id, event_json FROM async_delegations
-               WHERE state != 'running' AND delivery_state='pending' AND event_json IS NOT NULL
+               WHERE completion_type='async_delegation'
+                 AND state != 'running' AND delivery_state='pending'
+                 AND event_json IS NOT NULL
                ORDER BY completed_at, delegation_id"""
         ).fetchall()
         for _delegation_id, payload in rows:
@@ -288,6 +333,32 @@ def restore_undelivered_completions(target_queue) -> int:
                 evt["restored"] = True
             target_queue.put(evt)
     return len(rows)
+
+
+def discover_pending_completions(target_queue, *, completion_type: str) -> int:
+    """Enqueue pending rows created by another process after gateway startup."""
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            """SELECT delegation_id, event_json FROM async_delegations
+               WHERE completion_type=? AND delivery_state='pending'
+                 AND event_json IS NOT NULL
+                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
+               ORDER BY completed_at, delegation_id""",
+            (completion_type, time.time() - 300),
+        ).fetchall()
+    count = 0
+    for delegation_id, payload in rows:
+        try:
+            evt = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "Skipping malformed durable completion event %s", delegation_id
+            )
+            continue
+        if isinstance(evt, dict):
+            target_queue.put(evt)
+            count += 1
+    return count
 
 
 def mark_completion_delivered(delegation_id: str) -> bool:
@@ -323,14 +394,14 @@ def claim_completion_delivery(delegation_id: str, claim_id: str) -> bool:
 
 
 def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
-    """Claim a durable delegation event; non-durable events need no token."""
-    if evt.get("type") != "async_delegation":
+    """Claim an event stored on the durable completion ledger."""
+    if evt.get("type") not in {"async_delegation", "external_event"}:
         return ""
-    delegation_id = str(evt.get("delegation_id") or "")
-    if not delegation_id:
+    completion_id = str(evt.get("delegation_id") or evt.get("event_id") or "")
+    if not completion_id:
         return ""
     claim_id = f"{consumer}:{__import__('os').getpid()}:{uuid.uuid4().hex}"
-    return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
+    return claim_id if claim_completion_delivery(completion_id, claim_id) else None
 
 
 def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
@@ -362,13 +433,15 @@ def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
 
 
 def complete_event_delivery(evt: Dict[str, Any], claim_id: str) -> None:
-    if claim_id and evt.get("type") == "async_delegation":
-        complete_completion_delivery(str(evt.get("delegation_id") or ""), claim_id)
+    if claim_id and evt.get("type") in {"async_delegation", "external_event"}:
+        completion_id = str(evt.get("delegation_id") or evt.get("event_id") or "")
+        complete_completion_delivery(completion_id, claim_id)
 
 
 def release_event_delivery(evt: Dict[str, Any], claim_id: str) -> None:
-    if claim_id and evt.get("type") == "async_delegation":
-        release_completion_delivery(str(evt.get("delegation_id") or ""), claim_id)
+    if claim_id and evt.get("type") in {"async_delegation", "external_event"}:
+        completion_id = str(evt.get("delegation_id") or evt.get("event_id") or "")
+        release_completion_delivery(completion_id, claim_id)
 
 
 def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:

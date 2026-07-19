@@ -269,6 +269,34 @@ def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monk
     assert ad.get_durable_delegation(dispatched["delegation_id"])["delivery_state"] == "delivered"
 
 
+def test_restart_restore_excludes_external_events_from_legacy_queue(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    event = {
+        "type": "external_event",
+        "event_id": "event-external",
+        "session_key": "agent:main:telegram:dm:123",
+        "parent_session_id": "parent",
+        "payload": {"kind": "build.complete"},
+    }
+    ad.persist_durable_completion(
+        "event-external",
+        event,
+        completion_type="external_event",
+        session_key=event["session_key"],
+        parent_session_id=event["parent_session_id"],
+    )
+
+    restored = queue.Queue()
+    assert ad.restore_undelivered_completions(restored) == 0
+    assert restored.empty()
+
+    assert ad.discover_pending_completions(
+        restored, completion_type="external_event"
+    ) == 1
+    assert restored.get_nowait() == event
+    assert restored.empty()
+
+
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
     """Real-import E2E: a fresh interpreter restores a prior process's result."""
     repo = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -341,9 +369,9 @@ def test_submit_failure_removes_durable_running_record(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM async_delegations").fetchone()[0] == 0
 
 
-def test_pending_retention_prunes_delivered_before_undelivered(tmp_path, monkeypatch):
+def test_delivered_history_pruning_does_not_remove_pending(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(ad, "_MAX_RETAINED_COMPLETED", 2)
+    monkeypatch.setattr(ad, "_MAX_RETAINED_COMPLETED", 0)
     for index, delivery_state in enumerate(("pending", "delivered", "pending")):
         delegation_id = f"deleg_{index}"
         record = {
@@ -370,6 +398,65 @@ def test_pending_retention_prunes_delivered_before_undelivered(tmp_path, monkeyp
     assert ad.get_durable_delegation("deleg_0") is not None
     assert ad.get_durable_delegation("deleg_1") is None
     assert ad.get_durable_delegation("deleg_2") is not None
+
+
+def test_terminal_history_pruning_never_removes_pending_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(ad, "_MAX_RETAINED_COMPLETED", 2)
+    pending_ids = {f"pending-{index}" for index in range(4)}
+    delivered_ids = {f"delivered-{index}" for index in range(4)}
+    now = time.time()
+
+    with ad._DB_LOCK, ad._connect() as conn:
+        for index, delegation_id in enumerate(sorted(pending_ids | delivered_ids)):
+            delivery_state = (
+                "pending" if delegation_id in pending_ids else "delivered"
+            )
+            conn.execute(
+                """INSERT INTO async_delegations
+                   (delegation_id, origin_session, state, dispatched_at,
+                    completed_at, updated_at, delivery_state)
+                   VALUES (?, 'owner', 'completed', ?, ?, ?, ?)""",
+                (delegation_id, now + index, now + index, now + index, delivery_state),
+            )
+
+    ad._prune_durable_records()
+
+    with ad._DB_LOCK, ad._connect() as conn:
+        remaining = conn.execute(
+            "SELECT delegation_id, delivery_state FROM async_delegations"
+        ).fetchall()
+    assert {row[0] for row in remaining if row[1] == "pending"} == pending_ids
+    assert len([row for row in remaining if row[1] == "delivered"]) == 2
+
+
+def test_discover_pending_completions_skips_poison_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    valid_event = {
+        "type": "external_event",
+        "event_id": "valid-event",
+        "payload": {"status": "ready"},
+    }
+    with ad._DB_LOCK, ad._connect() as conn:
+        for completion_id, completed_at, event_json in (
+            ("poison-event", 1, "{not-json"),
+            ("valid-event", 2, json.dumps(valid_event)),
+            ("list-event", 3, json.dumps(["not", "a", "dictionary"])),
+        ):
+            conn.execute(
+                """INSERT INTO async_delegations
+                   (delegation_id, origin_session, state, dispatched_at,
+                    completed_at, updated_at, event_json, completion_type)
+                   VALUES (?, 'owner', 'completed', ?, ?, ?, ?, 'external_event')""",
+                (completion_id, completed_at, completed_at, completed_at, event_json),
+            )
+
+    discovered = queue.Queue()
+    assert ad.discover_pending_completions(
+        discovered, completion_type="external_event"
+    ) == 1
+    assert discovered.get_nowait() == valid_event
+    assert discovered.empty()
 
 
 def test_recover_marks_abandoned_running_record_unknown(tmp_path, monkeypatch):
@@ -871,5 +958,3 @@ def test_gateway_cli_origin_event_left_unrouted():
     evt = _make_async_evt(session_key="")
     runner._enrich_async_delegation_routing(evt)
     assert "platform" not in evt
-
-

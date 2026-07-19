@@ -893,7 +893,8 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     owner_started_at INTEGER,
     task_json TEXT,
     delivery_claim TEXT,
-    delivery_claimed_at REAL
+    delivery_claimed_at REAL,
+    completion_type TEXT NOT NULL DEFAULT 'async_delegation'
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
