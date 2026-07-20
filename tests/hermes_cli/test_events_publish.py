@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from external_events import TOKEN_ENV_VAR, issue_session_capability
+from gateway.external_events import TOKEN_ENV_VAR, issue_session_capability
 from hermes_cli.subcommands.events import publish_from_stdin
 
 

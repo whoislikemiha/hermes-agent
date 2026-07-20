@@ -79,6 +79,12 @@ def test_every_on_disk_subpackage_is_covered_by_packages_find():
     )
 
 
+def test_external_events_lives_in_a_shipped_package():
+    """Runtime state has an external_events/ dir, so a bare module is shadowable."""
+    assert (REPO_ROOT / "gateway" / "external_events.py").is_file()
+    assert not (REPO_ROOT / "external_events.py").exists()
+
+
 def test_packaging_declared_as_core_dependency():
     """Regression for #40503.
 

@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from external_events import (
+from gateway.external_events import (
     MAX_PAYLOAD_BYTES,
     TOKEN_ENV_VAR,
     ExternalEventError,

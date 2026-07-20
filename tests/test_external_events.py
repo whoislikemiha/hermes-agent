@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from external_events import (
+from gateway.external_events import (
     MAX_PAYLOAD_BYTES,
     ExternalEventError,
     issue_session_capability,
@@ -133,7 +133,7 @@ def test_publish_isolated_to_capability_profile(tmp_path):
 
 
 def test_capability_cleanup_is_bounded(monkeypatch, tmp_path):
-    monkeypatch.setattr("external_events._MAX_CAPABILITIES", 3)
+    monkeypatch.setattr("gateway.external_events._MAX_CAPABILITIES", 3)
 
     for index in range(5):
         issue_session_capability(
@@ -147,7 +147,7 @@ def test_capability_cleanup_is_bounded(monkeypatch, tmp_path):
 
 
 def test_reissued_capability_refreshes_recency_before_pruning(monkeypatch, tmp_path):
-    monkeypatch.setattr("external_events._MAX_CAPABILITIES", 3)
+    monkeypatch.setattr("gateway.external_events._MAX_CAPABILITIES", 3)
     paths = []
     for index in range(3):
         paths.append(

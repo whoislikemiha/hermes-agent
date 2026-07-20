@@ -74,7 +74,7 @@ def test_capability_issuance_failure_does_not_crash_hot_turn(monkeypatch):
         session_key="agent:main:discord:dm:channel-1",
     )
     monkeypatch.setattr(
-        "external_events.issue_session_capability",
+        "gateway.external_events.issue_session_capability",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
     )
 

@@ -16308,7 +16308,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _token_file = ""
         if _async_delivery and context.session_id and context.session_key:
             try:
-                from external_events import issue_session_capability
+                from gateway.external_events import issue_session_capability
 
                 _token_file = str(
                     issue_session_capability(

@@ -19,7 +19,7 @@ import pytest
 from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
-from external_events import issue_session_capability, publish_event
+from gateway.external_events import issue_session_capability, publish_event
 from tools.process_registry import ProcessRegistry, ProcessSession
 
 
