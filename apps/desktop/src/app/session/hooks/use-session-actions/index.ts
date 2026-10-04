@@ -3268,50 +3268,24 @@ export function useSessionActions({
         startFreshSessionDraft(true)
       }
 
+      // The DELETE ends the conversation's live session server-side (stop, then
+      // close: approvals, clarify, sudo and secret waits are released, #75587).
+      // Locally, mark the runtime interrupted first so a blocking-input request
+      // already queued on the transport is dropped instead of parking its
+      // overlay for a conversation that is about to be gone.
+      let previousInterruptState: Pick<ClientSessionState, 'interrupted' | 'needsInput'> | null = null
+
+      if (closingRuntimeId) {
+        updateSessionState(closingRuntimeId, state => {
+          previousInterruptState = { interrupted: state.interrupted, needsInput: state.needsInput }
+
+          return { ...state, interrupted: true, needsInput: false }
+        })
+        clearAllPrompts(closingRuntimeId)
+        clearClarifyRequest(undefined, closingRuntimeId)
+      }
+
       try {
-        if (closingRuntimeId) {
-          // Deleting a session must END its turn, not just drop the row.
-          // `session.close` tears down the runtime but does not walk the
-          // interrupt path that releases approval / clarify / sudo / secret
-          // waits, so a blocked run could outlive its sidebar row and surface a
-          // blocking prompt (and native notification) for a conversation that is
-          // gone (#75587). Mark the runtime interrupted first so a
-          // blocking-input request already queued on the transport is dropped
-          // instead of parking its overlay, then interrupt, then close.
-          let previousInterruptState: Pick<ClientSessionState, 'interrupted' | 'needsInput'> | null = null
-
-          updateSessionState(closingRuntimeId, state => {
-            previousInterruptState = { interrupted: state.interrupted, needsInput: state.needsInput }
-
-            return { ...state, interrupted: true, needsInput: false }
-          })
-
-          try {
-            await requestForSessionProfile(removedOwner, requestGateway, 'session.interrupt', {
-              session_id: closingRuntimeId
-            })
-          } catch (error) {
-            // A missing runtime has no turn left to stop. Any other failure means
-            // deletion cannot safely continue: restore the live state and let the
-            // outer rollback put the conversation back in the sidebar.
-            if (!isSessionGoneError(error)) {
-              updateSessionState(closingRuntimeId, state =>
-                previousInterruptState ? { ...state, ...previousInterruptState } : state
-              )
-              throw error
-            }
-          }
-
-          // Catch a blocking-input request already queued before the interrupted
-          // flag became visible to this renderer.
-          clearAllPrompts(closingRuntimeId)
-          clearClarifyRequest(undefined, closingRuntimeId)
-
-          await requestForSessionProfile(removedOwner, requestGateway, 'session.close', {
-            session_id: closingRuntimeId
-          }).catch(() => undefined)
-        }
-
         await deleteSession(storedSessionId, removedOwner)
 
         dropTranscriptTailEverywhere(storedSessionId)
@@ -3364,6 +3338,13 @@ export function useSessionActions({
           resetSessionBackground(sid)
         }
       } catch (err) {
+        // Refused (open in another window, or a turn still writing): the
+        // conversation stays, so its runtime must not stay marked interrupted.
+        if (closingRuntimeId && previousInterruptState) {
+          const restored: Pick<ClientSessionState, 'interrupted' | 'needsInput'> = previousInterruptState
+          updateSessionState(closingRuntimeId, state => ({ ...state, ...restored }))
+        }
+
         if (listed?.session) {
           restoreListedSession(listed.session, listed.slice)
         }
@@ -3405,7 +3386,6 @@ export function useSessionActions({
       activeSessionIdRef,
       copy,
       navigate,
-      requestGateway,
       runtimeIdByStoredSessionIdRef,
       selectedStoredSessionIdRef,
       sessionStateByRuntimeIdRef,
