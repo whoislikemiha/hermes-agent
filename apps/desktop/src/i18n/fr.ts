@@ -2632,6 +2632,7 @@ export const frOverrides = {
       unarchive: 'Restaurer',
       deletePermanently: 'Supprimer définitivement',
       messages: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
+      turns: count => `${count} tour${count === 1 ? '' : 's'}`,
       restored: 'Restauré',
       deleteConfirm: title => `Supprimer définitivement « ${title} » ? Cela ne peut pas être annulé.`,
       autoArchiveTitle: 'Auto-archiver les conversations inactives',
@@ -4124,6 +4125,7 @@ export const frOverrides = {
     loadCount: step => `Charger ${step} de plus`,
     messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
     toolCallCount: count => `${count} ${count === 1 ? "appel d'outil" : "appels d'outil"}`,
+    turnCount: count => `${count} tour${count === 1 ? '' : 's'}`,
     row: {
       pin: 'Épingler',
       unpin: 'Désépingler',

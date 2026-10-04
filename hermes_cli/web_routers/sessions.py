@@ -220,6 +220,7 @@ def get_sessions(
                 # _strip_session_list_rows below).
                 compact_rows=not full,
                 include_pinned=True,
+                include_turn_counts=True,
                 **scope)
             total = db.session_count(exclude_children=True, **scope)
             now = time.time()

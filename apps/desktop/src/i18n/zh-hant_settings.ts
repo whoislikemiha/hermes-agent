@@ -1423,6 +1423,7 @@ export const zhHantSettings = {
       unarchive: '取消封存',
       deletePermanently: '永久刪除',
       messages: count => `${count} 則訊息`,
+      turns: count => `${count} 輪`,
       restored: '已還原',
       deleteConfirm: title => `永久刪除「${title}」？此操作無法復原。`,
       autoArchiveTitle: '自動封存閒置對話',

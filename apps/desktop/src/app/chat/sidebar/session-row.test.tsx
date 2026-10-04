@@ -13,6 +13,7 @@ import { SESSION_ROW_AREAS, type SessionRowSlotProps } from '@/lib/session-row-s
 import type * as Time from '@/lib/time'
 import type * as ComposerStatusStore from '@/store/composer-status'
 import type * as SessionStore from '@/store/session'
+import { setSessionListDensity } from '@/store/session-list-density'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
 import type * as WindowsStore from '@/store/windows'
@@ -28,6 +29,7 @@ vi.mock('@/i18n', () => ({
       sidebar: {
         messageCount: (count: number) => `${count} messages`,
         toolCallCount: (count: number) => `${count} tool calls`,
+        turnCount: (count: number) => `${count} turns`,
         projects: {
           home: 'Home'
         },
@@ -459,5 +461,34 @@ describe('SidebarSessionRow continuation badge', () => {
     const branch = renderRow(makeSession({ parent_session_id: 'parent', title: 'A real branch' }))
 
     expect(continuationGlyph(branch.container)).toBeNull()
+  })
+})
+
+// The size shown on a row is the prompts the user typed. `message_count` also
+// counts every stored tool call and tool result, so a ten-prompt chat that ran
+// seventy tools used to read "156 messages".
+describe('SidebarSessionRow conversation size', () => {
+  const toolHeavy = { message_count: 156, model: 'claude-opus-5-5', title: 'Tool-heavy chat', tool_call_count: 70 }
+
+  afterEach(() => setSessionListDensity('compact'))
+
+  it('shows turns, not stored rows, on the inline row and the card', () => {
+    setSessionListDensity('detailed')
+    const inline = renderRow(makeSession({ ...toolHeavy, turn_count: 10 }))
+
+    expect(inline.container.textContent).toContain('10 turns · 70 tool calls')
+    expect(inline.container.textContent).not.toContain('156')
+    inline.unmount()
+
+    const card = renderRow(makeSession({ ...toolHeavy, turn_count: 10 }), { card: true })
+
+    expect(card.container.textContent).toContain('10 turns')
+    expect(card.container.textContent).not.toContain('156')
+  })
+
+  it('keeps the stored count against a backend that predates turn_count', () => {
+    const { container } = renderRow(makeSession(toolHeavy), { card: true })
+
+    expect(container.textContent).toContain('156 messages')
   })
 })

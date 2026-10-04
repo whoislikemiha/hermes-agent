@@ -634,6 +634,11 @@ export interface SessionInfo {
   started_at: number
   title: null | string
   tool_call_count: number
+  /** Prompts the user typed (`SessionDB.turn_counts`): no tool rows, no
+   *  backend notices — unlike {@link message_count}, which counts every
+   *  stored row. Undefined against backends predating the field; size labels
+   *  fall back to `message_count` there. */
+  turn_count?: number
   /** Origin platform when this session was handed off from a messaging
    *  platform (e.g. a Telegram thread continued in the desktop app). The live
    *  {@link source} becomes local (tui/desktop) after a handoff, so the origin

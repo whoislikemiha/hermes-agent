@@ -2266,6 +2266,7 @@ export const en: Translations = {
       unarchive: 'Unarchive',
       deletePermanently: 'Delete permanently',
       messages: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
+      turns: count => `${count} ${count === 1 ? 'turn' : 'turns'}`,
       restored: 'Restored',
       deleteConfirm: title => `Permanently delete "${title}"? This cannot be undone.`,
       autoArchiveTitle: 'Auto-archive stale chats',
@@ -3685,6 +3686,7 @@ export const en: Translations = {
     loadCount: step => `Load ${step} more`,
     messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
     toolCallCount: count => `${count} ${count === 1 ? 'tool call' : 'tool calls'}`,
+    turnCount: count => `${count} ${count === 1 ? 'turn' : 'turns'}`,
     row: {
       pin: 'Pin',
       unpin: 'Unpin',

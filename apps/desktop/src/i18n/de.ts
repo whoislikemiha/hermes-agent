@@ -2624,6 +2624,7 @@ export const deOverrides = {
       unarchive: 'Archivierung aufheben',
       deletePermanently: 'Endgültig löschen',
       messages: count => `${count} ${count === 1 ? 'Nachricht' : 'Nachrichten'}`,
+      turns: count => `${count} ${count === 1 ? 'Runde' : 'Runden'}`,
       restored: 'Wiederhergestellt',
       deleteConfirm: title => `"${title}" endgültig löschen? Das kann nicht rückgängig gemacht werden.`,
       autoArchiveTitle: 'Veraltete Chats automatisch archivieren',
@@ -4113,6 +4114,7 @@ export const deOverrides = {
     loadCount: step => `${step} mehr laden`,
     messageCount: count => `${count} ${count === 1 ? 'Nachricht' : 'Nachrichten'}`,
     toolCallCount: count => `${count} ${count === 1 ? 'Tool-Aufruf' : 'Tool-Aufrufe'}`,
+    turnCount: count => `${count} ${count === 1 ? 'Runde' : 'Runden'}`,
     row: {
       pin: 'Anpinnen',
       unpin: 'Lösen',

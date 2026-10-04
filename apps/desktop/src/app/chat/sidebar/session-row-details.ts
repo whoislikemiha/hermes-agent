@@ -1,3 +1,4 @@
+import { type SessionSizeFormatters, sessionSizeLabel } from '@/lib/session-size'
 import type { SessionListDensity } from '@/store/session-list-density'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -6,8 +7,7 @@ export interface SessionRowDetails {
   preview: null | string
 }
 
-export interface SessionRowFormatters {
-  messageCount: (count: number) => string
+export interface SessionRowFormatters extends SessionSizeFormatters {
   toolCallCount: (count: number) => string
 }
 
@@ -34,7 +34,7 @@ export function sessionRowDetails(session: SessionInfo, fmt: SessionRowFormatter
   const metadata = [
     session.git_branch?.trim() || null,
     modelLabel(session.model),
-    session.message_count > 0 ? fmt.messageCount(session.message_count) : null,
+    sessionSizeLabel(session, fmt),
     session.tool_call_count > 0 ? fmt.toolCallCount(session.tool_call_count) : null
   ]
     .filter(Boolean)

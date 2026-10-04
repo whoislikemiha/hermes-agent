@@ -19,6 +19,7 @@ import { pathLeaf } from '@/lib/display-path'
 import { triggerHaptic } from '@/lib/haptics'
 import { Archive, ArchiveOff, FolderOpen, Loader2, Trash2 } from '@/lib/icons'
 import { purgeInFlightTurnJournals } from '@/lib/inflight-turn-journal'
+import { sessionSizeLabel } from '@/lib/session-size'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
 import { applyConfiguredDefaultProjectDir, ensureDefaultWorkspaceCwd } from '@/store/session'
@@ -199,7 +200,11 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
                     </div>
                   }
                   description={session.preview || undefined}
-                  hint={label ? `${label} · ${s.messages(session.message_count)}` : s.messages(session.message_count)}
+                  hint={
+                    [label, sessionSizeLabel(session, { messageCount: s.messages, turnCount: s.turns })]
+                      .filter(Boolean)
+                      .join(' · ') || undefined
+                  }
                   title={sessionTitle(session)}
                 />
               </div>

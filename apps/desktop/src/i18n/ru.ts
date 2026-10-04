@@ -1560,6 +1560,7 @@ export const ru = defineLocale({
       unarchive: 'Восстановить',
       deletePermanently: 'Удалить безвозвратно',
       messages: count => `${count} ${RU_PLURAL(count, 'сообщение', 'сообщения', 'сообщений')}`,
+      turns: count => `${count} ${RU_PLURAL(count, 'ход', 'хода', 'ходов')}`,
       restored: 'Восстановлено',
       deleteConfirm: title => `Безвозвратно удалить «${title}»? Это действие необратимо.`,
       autoArchiveTitle: 'Авто-архивация старых чатов',
@@ -2791,6 +2792,7 @@ export const ru = defineLocale({
     messageCount: count => `${count} ${RU_PLURAL(count, 'сообщение', 'сообщения', 'сообщений')}`,
     toolCallCount: count =>
       `${count} ${RU_PLURAL(count, 'вызов инструмента', 'вызова инструмента', 'вызовов инструмента')}`,
+    turnCount: count => `${count} ${RU_PLURAL(count, 'ход', 'хода', 'ходов')}`,
     row: {
       pin: 'Закрепить',
       unpin: 'Открепить',

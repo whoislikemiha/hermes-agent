@@ -189,6 +189,7 @@ export const zhHantChrome = {
     loadCount: step => `再載入 ${step} 個`,
     messageCount: count => `${count} 條訊息`,
     toolCallCount: count => `${count} 次工具調用`,
+    turnCount: count => `${count} 輪`,
     row: {
       pin: '釘選',
       unpin: '取消釘選',
