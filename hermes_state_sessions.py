@@ -191,6 +191,16 @@ def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
     return ids
 
 
+def _lineage_ids(conn, session_id: str) -> List[str]:
+    """Every compression segment of *session_id*'s conversation, *session_id* first. A user deletes a
+    conversation, not a segment: deleting only the tip un-parents the earlier segments, which then list
+    as a conversation of their own."""
+    ids = dict.fromkeys([session_id])
+    for row in conn.execute(_LINEAGE_CTE_SQL + " SELECT id FROM lineage", (session_id, session_id)):
+        ids.setdefault(row["id"])
+    return list(ids)
+
+
 # Lifecycle statuses surfaced by session pickers; classified from the final
 # message row ONLY so it stays O(1) per session.
 # Sessions that are not human conversations (kanban workers, third-party tool integrations, finite one-shot
@@ -1592,16 +1602,17 @@ class SessionSessionsMixin:
                 pass
 
     def get_session_delete_targets(self, session_id: str) -> List[str]:
-        """Rows :meth:`delete_session` would remove: the session, then its recursive delegate children
-        (branch/compression children are orphaned, not deleted)."""
+        """Rows :meth:`delete_session` would remove: every compression segment of the conversation, then
+        their recursive delegate children (branch children are orphaned, not deleted)."""
         with self._read_ctx() as conn:
             if not conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone():
                 return []
             # Use the borrowed read connection, never self._conn: handing the shared writer connection to a
             # helper here executes on it without self._lock — the same unsynchronized-read class as
             # #99349/#90734.
-            delegate_ids = _collect_delegate_child_ids(conn, [session_id])
-        return [session_id, *sorted(delegate_ids)]
+            lineage_ids = _lineage_ids(conn, session_id)
+            delegate_ids = _collect_delegate_child_ids(conn, lineage_ids)
+        return [*lineage_ids, *sorted(delegate_ids)]
 
     def delete_session(
         self, session_id: str, sessions_dir: Optional[Path] = None,
@@ -1609,24 +1620,26 @@ class SessionSessionsMixin:
         expected_display_messages: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         exclude_active_write_guards: bool = False,
     ) -> bool:
-        """Delete a session and its messages; delegate children cascade, branch/compression children
-        are orphaned. Optional expected ids fence delegate drift; expected display snapshots fence
-        transcript drift. Both checks run inside the same write transaction as deletion.
-        With ``exclude_active_write_guards``, raises :class:`SessionActiveWriteGuardError` if the row
-        is protected by an active turn lease or compression lock."""
+        """Delete a conversation: every compression segment of *session_id* and their messages; delegate
+        children cascade, branch children are orphaned. Optional expected ids fence delegate/segment drift;
+        expected display snapshots fence transcript drift. Both checks run inside the same write transaction
+        as deletion. With ``exclude_active_write_guards``, raises :class:`SessionActiveWriteGuardError` if
+        any doomed row is protected by an active turn lease or compression lock."""
         removed_ids: List[str] = []
         expected_ids = set(expected_delete_ids) if expected_delete_ids is not None else None
         def _do(conn):
             if conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone() is None:
                 return False
+            lineage_ids = _lineage_ids(conn, session_id)
             target_ids = (
-                [session_id, *_collect_delegate_child_ids(conn, [session_id])]
+                [*lineage_ids, *_collect_delegate_child_ids(conn, lineage_ids)]
                 if exclude_active_write_guards or expected_ids is not None else None
             )
             if exclude_active_write_guards and self._guarded_ids(conn, target_ids):
-                # Delegate children cascade with the root, so a guard on any of them refuses too.
+                # Segments and delegate children go with the conversation, so a guard on any of them refuses.
                 raise SessionActiveWriteGuardError(
-                    f"session '{session_id}' (or a delegate child) has an active turn lease or compression lock"
+                    f"session '{session_id}' (or a segment / delegate child) has an active turn lease or "
+                    "compression lock"
                 )
             if expected_ids is not None and expected_ids != set(target_ids):
                 return False
@@ -1635,14 +1648,16 @@ class SessionSessionsMixin:
                 for covered_id, expected in expected_display_messages.items()
             ):
                 return False
-            removed_ids.extend(_delete_delegate_children(conn, [session_id]))
-            conn.execute(  # orphan remaining children (branches) so FK is satisfied
-                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (session_id,),
-            )
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            removed_ids.extend(_delete_delegate_children(conn, lineage_ids))
+            for chunk in _id_chunks(lineage_ids):
+                ph = _session_ids_placeholders(chunk)
+                conn.execute(  # orphan remaining children (branches) so FK is satisfied
+                    f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
+                )
+                conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
+                conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
             self._delete_unreferenced_system_prompts(conn)
-            removed_ids.append(session_id)
+            removed_ids.extend(lineage_ids)
             return True
         deleted = self._execute_write(_do)
         for sid in removed_ids:
@@ -1685,10 +1700,11 @@ class SessionSessionsMixin:
         self, session_ids: List[str], sessions_dir: Optional[Path] = None,
         exclude_active_write_guards: bool = False, skipped_ids: Optional[List[str]] = None,
     ) -> int:
-        """Bulk delete with :meth:`delete_session` semantics per row, in ONE transaction. Unknown ids
-        are skipped (UI selection can race another tab's delete). With ``exclude_active_write_guards``,
-        rows protected by an active turn lease or compression lock are skipped and, when given, appended
-        to ``skipped_ids`` so callers can tell the user. Returns the number deleted."""
+        """Bulk delete with :meth:`delete_session` semantics per conversation, in ONE transaction. Unknown
+        ids are skipped (UI selection can race another tab's delete). With ``exclude_active_write_guards``,
+        a conversation with any segment or delegate child protected by an active turn lease or compression
+        lock is skipped and, when given, its id appended to ``skipped_ids`` so callers can tell the user.
+        Returns the number of selected conversations deleted."""
         unique_ids = list({sid for sid in session_ids or () if isinstance(sid, str) and sid})
         if not unique_ids:
             return 0
@@ -1699,23 +1715,26 @@ class SessionSessionsMixin:
             ).fetchall()]
             if not existing:
                 return 0
+            lineages = {sid: _lineage_ids(conn, sid) for sid in existing}
             if exclude_active_write_guards:
-                # A root is skipped when it or any delegate child it would cascade is guarded, so the
-                # cascade below never deletes a guarded row reported back as kept.
-                # One batched check first; per-root attribution only when something is guarded.
+                # A conversation is skipped when any row it would remove is guarded, so the cascade below
+                # never deletes a guarded row reported back as kept.
+                # One batched check first; per-conversation attribution only when something is guarded.
+                every_id = list(dict.fromkeys(i for ids in lineages.values() for i in ids))
                 active_ids: set = set()
-                if self._guarded_ids(conn, [*existing, *_collect_delegate_child_ids(conn, existing)]):
+                if self._guarded_ids(conn, [*every_id, *_collect_delegate_child_ids(conn, every_id)]):
                     active_ids = {
-                        sid for sid in existing
-                        if self._guarded_ids(conn, [sid, *_collect_delegate_child_ids(conn, [sid])])
+                        sid for sid, ids in lineages.items()
+                        if self._guarded_ids(conn, [*ids, *_collect_delegate_child_ids(conn, ids)])
                     }
                 existing = [sid for sid in existing if sid not in active_ids]
                 if skipped_ids is not None:
                     skipped_ids.extend(sorted(active_ids))
                 if not existing:
                     return 0
-            removed_ids.extend(_delete_delegate_children(conn, existing))
-            for chunk in _id_chunks(existing):
+            doomed = list(dict.fromkeys(i for sid in existing for i in lineages[sid]))
+            removed_ids.extend(_delete_delegate_children(conn, doomed))
+            for chunk in _id_chunks(doomed):
                 ph = _session_ids_placeholders(chunk)
                 conn.execute(  # orphan children whose parent is in the kill list (FK)
                     f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
@@ -1723,7 +1742,7 @@ class SessionSessionsMixin:
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
             self._delete_unreferenced_system_prompts(conn)
-            removed_ids.extend(existing)
+            removed_ids.extend(doomed)
             return len(existing)
         count = self._execute_write(_do)
         for sid in removed_ids:
