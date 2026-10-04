@@ -4953,6 +4953,28 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_finalize_for_delete_skips_transcript_persist_and_memory_commit(monkeypatch):
+    """A deleted conversation's rows go right after teardown: finalize must not write the transcript back
+    or hand it to the memory provider. The finalize hook still fires (plugins see the session end)."""
+    calls = {"hooks": [], "persisted": False, "committed": False}
+
+    agent = types.SimpleNamespace(session_id="session-key", _session_messages=[{"role": "user"}])
+    agent._persist_session = lambda _snapshot: calls.__setitem__("persisted", True)
+    agent.commit_memory_session = lambda _history: calls.__setitem__("committed", True)
+    session = _session(agent=agent, history=[{"role": "user", "content": "hello"}])
+    monkeypatch.setattr(
+        server,
+        "_notify_session_boundary",
+        lambda event, session_id, *_args: calls["hooks"].append((event, session_id)),
+    )
+
+    server._finalize_session(session, end_reason="deleted")
+
+    assert calls["persisted"] is False
+    assert calls["committed"] is False
+    assert ("on_session_finalize", "session-key") in calls["hooks"]
+
+
 def test_session_close_releases_resume_lock_before_slow_teardown(monkeypatch):
     """One slow session finalizer must not stall unrelated session.resume RPCs."""
     teardown_started = threading.Event()
@@ -14545,6 +14567,31 @@ def test_interrupt_drops_queued_prompt_for_session():
         server._sessions.pop("sid", None)
 
 
+def test_interrupt_does_not_wait_on_or_report_a_failed_agent_build(monkeypatch):
+    """Stop needs only the session record: a failed build (e.g. no provider credentials when the
+    conversation was opened) must not turn Stop, and the stop-then-delete flow, into that build error."""
+    session = _session(running=False)
+    session["agent"] = None
+    ready = threading.Event()
+    ready.set()
+    session["agent_ready"] = ready
+    session["agent_error"] = "No Anthropic credentials found."
+    server._sessions["sid"] = session
+    monkeypatch.setattr(
+        server, "_start_agent_build",
+        lambda *_a, **_k: pytest.fail("session.interrupt must not start an agent build"))
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+        )
+
+        assert resp.get("result", {}).get("status") == "interrupted", f"got: {resp}"
+        assert session["_turn_cancel_requested"] is True
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_interrupt_before_agent_ready_prevents_late_turn_start(monkeypatch):
     """Stop during lazy agent startup must not start the turn after init finishes."""
     threads = []
@@ -15975,17 +16022,22 @@ def test_session_delete_returns_db_unavailable_when_no_db(monkeypatch):
     assert resp["error"]["data"]["code"] == "storage_locked"
 
 
-def test_session_delete_refuses_active_session(monkeypatch):
-    """Cannot delete a session currently bound to a live TUI session."""
+def test_session_delete_tears_down_a_live_session_then_deletes(monkeypatch):
+    """A conversation open in THIS process is stopped and closed by the delete itself (clients send only
+    the delete), instead of being refused and left to each client to tear down first."""
     called: list[str] = []
 
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
+            assert "live" not in server._sessions, "rows must go only after the live session is closed"
             called.append(sid)
             return True
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
-    monkeypatch.setitem(server._sessions, "live", {"session_key": "key-live"})
+    monkeypatch.setitem(server._sessions, "live", _session(session_key="key-live"))
     try:
         resp = server.handle_request(
             {
@@ -15997,9 +16049,8 @@ def test_session_delete_refuses_active_session(monkeypatch):
     finally:
         server._sessions.pop("live", None)
 
-    assert "error" in resp
-    assert resp["error"]["code"] == 4023
-    assert called == [], "delete_session must not be called for active sessions"
+    assert resp.get("result") == {"deleted": "key-live"}, resp
+    assert called == ["key-live"]
 
 
 def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
@@ -16029,6 +16080,9 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
 
 def test_session_delete_returns_4007_when_missing(monkeypatch):
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return []
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             return False
 
@@ -16044,6 +16098,9 @@ def test_session_delete_returns_4007_when_missing(monkeypatch):
 
 def test_session_delete_propagates_db_exception(monkeypatch):
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             raise RuntimeError("disk full")
 
@@ -16065,6 +16122,9 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     captured: dict = {}
 
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             captured["sid"] = sid
             captured["sessions_dir"] = sessions_dir
@@ -16291,6 +16351,9 @@ def test_session_delete_honors_params_profile_sessions_dir(monkeypatch, tmp_path
     class ProfileDB:
         def __init__(self, db_path=None):
             captured["db_path"] = db_path
+
+        def get_session_delete_targets(self, sid):
+            return [sid]
 
         def delete_session(self, sid, sessions_dir=None, **_kw):
             captured["sid"] = sid

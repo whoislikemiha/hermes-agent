@@ -616,8 +616,12 @@ def _cmd_delete(db, args):
             return
     elif _pinned_note:
         print(f"Warning: deleting a pinned session '{resolved_session_id}'.")
+    from hermes_cli.session_delete import delete_stored_conversation
+
     try:
-        if not db.delete_session(resolved_session_id, sessions_dir=_sessions_dir(), exclude_active_write_guards=True):
+        # The CLI owns no live session: a conversation open in any Hermes window is refused, not deleted
+        # out from under it (SessionOpenElsewhereError is a SessionActiveWriteGuardError).
+        if not delete_stored_conversation(db, resolved_session_id, home=get_hermes_home()):
             return _not_found(args.session_id)
     except SessionActiveWriteGuardError as exc:
         print(f"Cannot delete active session: {exc}")

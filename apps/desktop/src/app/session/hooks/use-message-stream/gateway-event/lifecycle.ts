@@ -2,6 +2,7 @@ import type { GatewayEvent } from '@hermes/shared'
 import type { HermesSkin } from '@hermes/shared/skin'
 
 import { invalidateContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
+import { purgeInFlightTurnJournals } from '@/lib/inflight-turn-journal'
 import { clearClarifyRequest } from '@/store/clarify'
 import {
   notifyCronChanged,
@@ -14,16 +15,18 @@ import {
   type PetChangeMeta,
   setChangeEventsAvailable
 } from '@/store/live-sync'
+import { prunePreviewTabsForSession } from '@/store/preview'
 import { clearAllPrompts, clearApprovalRequest } from '@/store/prompts'
 import { markRuntimeGone } from '@/store/runtime-gone'
 import { dropSessionState, unbindTileRuntime } from '@/store/session-states'
+import { dropTranscriptTailEverywhere } from '@/store/transcript-tail-cache'
 // Leaf import (not the `@/themes` barrel) to avoid pulling the ThemeProvider
 // module graph into the gateway event hot path.
 import { ingestBackendSkin } from '@/themes/backend-sync'
 
 import type { GatewayEventContext } from './types'
 
-/** gateway.ready / setup.ready / skin.changed / change-watcher broadcasts / session.reclaimed. */
+/** gateway.ready / setup.ready / skin.changed / change-watcher broadcasts / session.reclaimed / session.deleted. */
 export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, fromActiveSource } = ctx
 
@@ -139,23 +142,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       // Heal while the cached stored-id mapping is still intact, then drop.
       markRuntimeGone(reclaimedRuntimeId)
       invalidateContextBreakdown(reclaimedStoredId || reclaimedRuntimeId)
-      dropSessionState(reclaimedRuntimeId)
-      // A prompt keyed to the dead runtime must not outlive it. The runtime id
-      // rotates on every resume (cold/lazy/eager all mint a fresh sid), so the
-      // new runtime's turn-end clears can never remove an entry keyed to THIS
-      // one — a stale approval would re-mount the floating "needs approval"
-      // bar whenever the reclaimed conversation is reopened (#86577).
-      clearAllPrompts(reclaimedRuntimeId)
-      clearClarifyRequest(undefined, reclaimedRuntimeId)
-      // A tile bound to the reclaimed runtime would otherwise render an
-      // empty transcript forever: its view reads $sessionStates[runtime]
-      // (just dropped) and its resume effect is gated on !runtimeId, so a
-      // bound tile never re-resumes (#82620). Unbind it so the effect
-      // refires against the intact stored session — and purge the wiring
-      // cache's entry, or resumeTile's warm path would hand the dead
-      // runtime straight back instead of cold-resuming a live one.
-      unbindTileRuntime(reclaimedRuntimeId)
-      deps.sessionStateByRuntimeIdRef.current.delete(reclaimedRuntimeId)
+      dropClosedRuntime(ctx, reclaimedRuntimeId)
     }
 
     // The row's ended_at moved, so refresh the lists that render it.
@@ -164,5 +151,58 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
     return true
   }
 
+  if (event.type === 'session.deleted') {
+    // A conversation was deleted — from this window, another window, the TUI,
+    // the dashboard or the CLI. The backend already closed its live sessions
+    // and removed every stored row; drop what this window still holds so no
+    // pane, tile, prompt or journal outlives it. Idempotent: the window that
+    // clicked Delete has already done the same cleanup.
+    const deleted = (event as GatewayEvent<'session.deleted'>).payload
+
+    for (const runtimeId of deleted?.runtime_session_ids ?? []) {
+      dropClosedRuntime(ctx, String(runtimeId))
+    }
+
+    const storedIds = (deleted?.stored_session_ids ?? []).map(id => String(id)).filter(Boolean)
+
+    for (const storedId of storedIds) {
+      dropTranscriptTailEverywhere(storedId)
+      prunePreviewTabsForSession(storedId)
+    }
+
+    purgeInFlightTurnJournals(storedIds)
+
+    if (fromActiveSource()) {
+      notifySessionsChanged()
+    }
+
+    return true
+  }
+
   return false
+}
+
+/** Forget a runtime the backend closed (reclaimed or deleted). */
+function dropClosedRuntime({ deps }: GatewayEventContext, runtimeId: string): void {
+  if (!runtimeId) {
+    return
+  }
+
+  dropSessionState(runtimeId)
+  // A prompt keyed to the dead runtime must not outlive it. The runtime id
+  // rotates on every resume (cold/lazy/eager all mint a fresh sid), so the
+  // new runtime's turn-end clears can never remove an entry keyed to THIS
+  // one — a stale approval would re-mount the floating "needs approval"
+  // bar whenever the reclaimed conversation is reopened (#86577).
+  clearAllPrompts(runtimeId)
+  clearClarifyRequest(undefined, runtimeId)
+  // A tile bound to the reclaimed runtime would otherwise render an
+  // empty transcript forever: its view reads $sessionStates[runtime]
+  // (just dropped) and its resume effect is gated on !runtimeId, so a
+  // bound tile never re-resumes (#82620). Unbind it so the effect
+  // refires against the intact stored session — and purge the wiring
+  // cache's entry, or resumeTile's warm path would hand the dead
+  // runtime straight back instead of cold-resuming a live one.
+  unbindTileRuntime(runtimeId)
+  deps.sessionStateByRuntimeIdRef.current.delete(runtimeId)
 }

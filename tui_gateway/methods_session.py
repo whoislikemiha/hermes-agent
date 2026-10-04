@@ -1157,25 +1157,21 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.delete")
 def _(rid, params: dict) -> dict:
-    """Delete a stored session + transcripts; refused while live here (FK trips on the agent's next flush)."""
+    """Delete a conversation, live state included (``_delete_conversation``, shared with REST DELETE).
+    4023 when another process has it open or a turn is still writing it."""
     from hermes_state_errors import SessionActiveWriteGuardError  # body runs on server.py globals
 
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
-    snapshot, err = _snapshot_sessions(rid)
-    if err:
-        return err
-    if any(s.get("session_key") == target for _sid, s in snapshot):
-        return _err(rid, 4023, "cannot delete an active session")
     profile_home = _profile_home((params.get("profile") or "").strip() or None)
     with _profile_db(params, writer=True) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5036)
         try:
             home = Path(profile_home) if profile_home is not None else get_hermes_home()
-            deleted = db.delete_session(target, sessions_dir=home / "sessions", exclude_active_write_guards=True)
-        except SessionActiveWriteGuardError:
-            return _err(rid, 4023, "cannot delete an active session")
+            deleted = _delete_conversation(db, target, home=home)
+        except SessionActiveWriteGuardError as e:  # includes SessionOpenElsewhereError
+            return _err(rid, 4023, str(e) or "cannot delete an active session")
         except Exception as e:
             return _err(rid, 5036, f"delete failed: {e}")
     return _ok(rid, {"deleted": target}) if deleted else _err(rid, 4007, "session not found")
@@ -2386,9 +2382,9 @@ def _(rid, params: dict) -> dict:
             except Exception as exc:
                 return _err(rid, 5019, f"compute-host interrupt failed: {exc}")
             return _ok(rid, {"status": "interrupted", "turn_isolation": True})
-        session, err = _sess(params, rid)
-        if err:
-            return err
+        # No agent wait: the stop needs only the session record. `_interrupt_session_turn` reads the agent
+        # None-safely, and a prompt still waiting on the build honors `_turn_cancel_requested`. Waiting here
+        # made Stop/Delete hang on a cold build and fail with a failed build's stored error.
         _interrupt_session_turn(sid, session)
         # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
         # and session.resume auto-continues the turn the user just stopped (the extra key covers compression

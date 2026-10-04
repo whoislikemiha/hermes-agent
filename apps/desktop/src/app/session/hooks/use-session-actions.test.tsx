@@ -419,9 +419,9 @@ describe('connection-qualified session deletion', () => {
       connectionId: 'source-a',
       profile: 'worker'
     })
-    expect(requestGatewayForAgent).toHaveBeenCalledWith('source-a', 'worker', 'session.close', {
-      session_id: 'runtime-shared'
-    })
+    // The owning backend stops and closes the live session as part of the
+    // DELETE; the client sends no lifecycle RPCs of its own on any route.
+    expect(vi.mocked(requestGatewayForAgent).mock.calls.map(call => call[2])).not.toContain('session.close')
     expect(requestGateway).not.toHaveBeenCalledWith('session.close', expect.anything())
   })
 
@@ -456,19 +456,18 @@ describe('connection-qualified session deletion', () => {
     })
 
     expect(navigate).toHaveBeenCalledWith(NEW_CHAT_ROUTE, { replace: true })
-    expect(requestGatewayForAgent).toHaveBeenCalledWith('source-a', 'worker', 'session.close', {
-      session_id: 'runtime-shared'
-    })
+    expect(deleteSession).toHaveBeenCalledWith('shared-session', { connectionId: 'source-a', profile: 'worker' })
     expect(selectedStoredSessionIdRef.current).toBeNull()
     expect(activeSessionIdRef.current).toBeNull()
   })
 
-  // #75587: deleting a NON-selected (sidebar/background) session used to skip
-  // session.close entirely (`closingRuntimeId` was gated on selection), so its
-  // in-flight turn kept running and could surface an approval prompt for a
-  // conversation that no longer existed. The runtime must be resolved from the
-  // stored→runtime map, marked interrupted, interrupted, and closed.
-  it('interrupts and closes a non-selected session resolved from the runtime map', async () => {
+  // #75587: deleting a NON-selected (sidebar/background) session must end its
+  // in-flight turn too, or it can surface an approval prompt for a conversation
+  // that no longer exists. The backend's DELETE now stops and closes the live
+  // session itself; the client resolves the runtime from the stored→runtime
+  // map only to mark it interrupted, so a blocking-input frame already queued on
+  // the transport is declined instead of parked.
+  it('marks a non-selected session runtime interrupted and leaves stop/close to the server', async () => {
     const requestGateway = vi.fn().mockResolvedValue({})
 
     const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
@@ -502,27 +501,21 @@ describe('connection-qualified session deletion', () => {
       await actions?.removeSession('background-session')
     })
 
-    expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { session_id: 'runtime-bg' })
-    expect(requestGateway).toHaveBeenCalledWith('session.close', { session_id: 'runtime-bg' })
-    // The selected session's runtime must not be touched by another row's delete.
-    expect(requestGateway).not.toHaveBeenCalledWith('session.interrupt', { session_id: 'runtime-foreground' })
-    expect(requestGateway).not.toHaveBeenCalledWith('session.close', { session_id: 'runtime-foreground' })
-    // Marked interrupted BEFORE the RPCs so a queued blocking-input frame is
-    // declined instead of parked.
+    expect(deleteSession).toHaveBeenCalledWith('background-session', undefined)
+    expect(requestGateway).not.toHaveBeenCalledWith('session.interrupt', expect.anything())
+    expect(requestGateway).not.toHaveBeenCalledWith('session.close', expect.anything())
     expect(updateSessionState).toHaveBeenCalledWith('runtime-bg', expect.any(Function))
+    expect(updateSessionState).not.toHaveBeenCalledWith('runtime-foreground', expect.any(Function))
     expect(updateSessionState.mock.results[0].value).toMatchObject({ interrupted: true, needsInput: false })
-    expect(updateSessionState.mock.invocationCallOrder[0]).toBeLessThan(requestGateway.mock.invocationCallOrder[0])
+    expect(updateSessionState.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(deleteSession).mock.invocationCallOrder[0]
+    )
   })
 
-  it('rolls the delete back when the interrupt fails for a reason other than a gone runtime', async () => {
-    const requestGateway = vi.fn().mockImplementation(async (method: string) => {
-      if (method === 'session.interrupt') {
-        throw new Error('gateway unreachable')
-      }
-
-      return {}
-    })
-
+  // A refused delete (the conversation is open in another window, or a turn is
+  // still writing it) keeps the conversation: the row comes back and its runtime
+  // must not stay marked interrupted.
+  it('restores the row and the runtime interrupt state when the backend refuses the delete', async () => {
     const updateSessionState = vi.fn((_sessionId: string, updater: (state: ClientSessionState) => ClientSessionState) =>
       updater({ interrupted: false, needsInput: true } as ClientSessionState)
     )
@@ -530,7 +523,7 @@ describe('connection-qualified session deletion', () => {
     let actions: HarnessHandle | null = null
 
     setSessions([storedSession({ id: 'background-session' })])
-    vi.mocked(deleteSession).mockResolvedValue({ ok: true })
+    vi.mocked(deleteSession).mockRejectedValue(new Error('This chat is open in another Hermes window/terminal.'))
 
     render(
       <Harness
@@ -538,7 +531,7 @@ describe('connection-qualified session deletion', () => {
         onReady={value => {
           actions = value
         }}
-        requestGateway={requestGateway}
+        requestGateway={vi.fn().mockResolvedValue({})}
         runtimeIdByStoredSessionIdRef={{ current: new Map([['background-session', 'runtime-bg']]) }}
         selectedStoredSessionId="foreground-session"
         updateSessionState={updateSessionState}
@@ -550,9 +543,6 @@ describe('connection-qualified session deletion', () => {
       await actions?.removeSession('background-session')
     })
 
-    expect(requestGateway).not.toHaveBeenCalledWith('session.close', expect.anything())
-    expect(deleteSession).not.toHaveBeenCalled()
-    // The live state the interrupt clobbered is restored, and the row survives.
     expect(updateSessionState.mock.results.at(-1)?.value).toMatchObject({ interrupted: false, needsInput: true })
     expect($sessions.get().some(session => session.id === 'background-session')).toBe(true)
   })

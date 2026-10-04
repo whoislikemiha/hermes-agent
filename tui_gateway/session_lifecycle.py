@@ -58,6 +58,9 @@ def _notify_session_boundary(event_type: str, session_id: str | None, platform: 
 
 _SESSION_OWNERSHIP_UNAVAILABLE = "Hermes could not safely reserve this session. Try again."
 _AUTOMATIC_SESSION_END_REASONS = frozenset({"ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
+# The user deleted the conversation: its rows are removed right after teardown, so finalize must not write the
+# transcript back or hand it to the memory provider.
+SESSION_END_DELETED = "deleted"
 
 
 def _lease_metadata(live_session_id: str) -> dict:
@@ -373,7 +376,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     # Persist via ``_persist_session``'s marker-based dedup (gateway-shutdown flush contract). Do NOT pass
     # ``conversation_history``: ``session["history"]`` and ``_session_messages`` alias the SAME list after a turn, so
     # the flush would treat every message as durable and skip it — data loss when finalize is the sole persist path.
-    if hasattr(agent, "_persist_session") and (snapshot := getattr(agent, "_session_messages", None)):
+    deleting = end_reason == SESSION_END_DELETED
+    if not deleting and hasattr(agent, "_persist_session") and (snapshot := getattr(agent, "_session_messages", None)):
         with contextlib.suppress(Exception):
             agent._persist_session(snapshot)
     # interrupted=True so crash-recovery plugins can flush state (mirrors cli.py atexit). The end-of-session
@@ -389,7 +393,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                     "on_session_end", completed=False, interrupted=True,
                     session_id=getattr(agent, "session_id", None) or session.get("session_key", ""),
                     model=getattr(agent, "model", "unknown"), platform=getattr(agent, "platform", None) or "tui")
-        if agent is not None and history and hasattr(agent, "commit_memory_session"):
+        if not deleting and agent is not None and history and hasattr(agent, "commit_memory_session"):
             with contextlib.suppress(Exception):
                 agent.commit_memory_session(history)
 
@@ -671,6 +675,73 @@ def _close_session_by_id(
             return False
         session = _pop_session_by_id(sid)
     return _teardown_popped_session(session, end_reason=end_reason)
+
+
+# ── delete ────────────────────────────────────────────────────────────
+def _live_sessions_for_delete(ids, home) -> list[tuple[str, dict]]:
+    """Live records this process holds for any of *ids* (a conversation's segments, so a record whose key
+    compression rotated is still found) in profile *home*. A record without ``profile_home`` belongs to the
+    launch profile, which *home* names either as the import-time ``_hermes_home`` or the current
+    ``get_hermes_home()`` (they differ under a scoped home override)."""
+    wanted = {str(i) for i in ids if i}
+    home = Path(home).resolve()
+    launch = home in {Path(_hermes_home).resolve(), Path(get_hermes_home()).resolve()}
+
+    def _same_profile(session: dict) -> bool:
+        own = session.get("profile_home")
+        return Path(own).resolve() == home if own else launch
+
+    with _sessions_lock:
+        return [
+            (sid, session) for sid, session in list(_sessions.items())
+            if (_session_lookup_key(session, fallback=sid) in wanted or str(session.get("session_key") or "") in wanted)
+            and _same_profile(session)
+        ]
+
+
+def _teardown_for_delete(ids, home) -> list[str]:
+    """Stop and close every live session this process holds for the conversation, before its rows go: the
+    stop releases approvals, queued prompts, subagents and background review; the close joins the turn
+    thread and finalizes without persisting or committing memory (``SESSION_END_DELETED``). Returns the
+    closed runtime ids."""
+    closed = []
+    for sid, session in _live_sessions_for_delete(ids, home):
+        try:
+            _interrupt_session_turn(sid, session)
+        except Exception:
+            logger.warning("delete: interrupt of live session %s failed; closing anyway", sid, exc_info=True)
+        with _session_resume_lock:  # same ownership claim as session.close
+            popped = _pop_session_by_id(sid)
+        if _teardown_popped_session(popped, end_reason=SESSION_END_DELETED):
+            closed.append(sid)
+    return closed
+
+
+def _delete_conversation(db, session_id: str, *, home) -> list[str]:
+    """The one delete every entry point calls: tear down this process's live sessions for the conversation,
+    delete its rows (refused if another process has it open, see ``hermes_cli.session_delete``), and tell
+    every connected client. Returns the removed ids, ``[]`` when *session_id* is unknown."""
+    from hermes_cli.session_delete import delete_stored_conversation
+
+    closed = _teardown_for_delete(db.get_session_delete_targets(session_id), home)
+    ids = delete_stored_conversation(db, session_id, home=Path(home))
+    if ids:
+        _broadcast_global_event("session.deleted", {"stored_session_ids": ids, "runtime_session_ids": closed})
+    return ids
+
+
+def _delete_conversations(db, session_ids, *, home) -> tuple[list[str], list[str]]:
+    """Bulk :func:`_delete_conversation`: each conversation torn down on its own, rows removed in one
+    transaction. Returns ``(deleted, skipped)`` selected ids."""
+    from hermes_cli.session_delete import delete_stored_conversations
+
+    targets = {sid: db.get_session_delete_targets(sid) for sid in dict.fromkeys(session_ids) if sid}
+    closed = [rt for ids in targets.values() for rt in _teardown_for_delete(ids, home)]
+    deleted, skipped = delete_stored_conversations(db, list(targets), home=Path(home))
+    if deleted:
+        _broadcast_global_event("session.deleted", {
+            "stored_session_ids": [i for sid in deleted for i in targets[sid]], "runtime_session_ids": closed})
+    return deleted, skipped
 
 
 def _ws_session_is_detached(session: dict | None) -> bool:

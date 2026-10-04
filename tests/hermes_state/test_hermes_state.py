@@ -1538,6 +1538,56 @@ class TestDeleteSessionOrphansChildren:
         assert grandchild["parent_session_id"] == "child"
 
 
+class TestDeleteSessionRemovesCompressionLineage:
+    """A conversation compressed N times is N rows chained by compression-ended parents. Deleting any
+    of them deletes the conversation; deleting only one used to re-list the earlier segment."""
+
+    def _compressed(self, db):
+        db.create_session(session_id="root", source="desktop")
+        db.append_message("root", "user", "first segment")
+        db.end_session("root", "compression")
+        db.create_session(session_id="mid", source="desktop", parent_session_id="root")
+        db.end_session("mid", "compression")
+        db.create_session(session_id="tip", source="desktop", parent_session_id="mid")
+        db.append_message("tip", "user", "latest segment")
+        db.create_session("delegate", "desktop", parent_session_id="root",
+                          model_config={"_delegate_from": "root"})
+        db.create_session("branch", "desktop", parent_session_id="tip",
+                          model_config={"_branched_from": "tip"})
+        db.append_message("branch", "user", "a branch is its own conversation")
+
+    @pytest.mark.parametrize("target", ["tip", "mid", "root"])
+    def test_any_segment_deletes_the_whole_conversation(self, db, target):
+        self._compressed(db)
+
+        assert db.delete_session(target, exclude_active_write_guards=True) is True
+
+        for sid in ("root", "mid", "tip", "delegate"):
+            assert db.get_session(sid) is None, sid
+        assert db.get_messages("root") == [] and db.get_messages("tip") == []
+        assert {r["id"] for r in db.list_sessions_rich(limit=50)} == {"branch"}
+        assert db.get_session("branch")["parent_session_id"] is None
+
+    def test_delete_targets_name_every_segment(self, db):
+        self._compressed(db)
+
+        targets = db.get_session_delete_targets("tip")
+
+        assert targets[0] == "tip"
+        assert set(targets[:3]) == {"tip", "mid", "root"}
+        assert targets[3:] == ["delegate"]
+
+    def test_bulk_delete_removes_each_selected_conversation_whole(self, db):
+        self._compressed(db)
+        db.create_session(session_id="other", source="desktop")
+        db.append_message("other", "user", "unrelated")
+
+        assert db.delete_sessions(["tip", "other"]) == 2
+
+        assert [r["id"] for r in db.list_sessions_rich(limit=50)] == ["branch"]
+        assert db.get_session("root") is None
+
+
 class TestBulkDeleteSessions:
     """``delete_sessions(ids)`` — the bulk-delete primitive backing the
     sessions-page "Delete N selected" button. Per-row contract matches
