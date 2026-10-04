@@ -16022,17 +16022,22 @@ def test_session_delete_returns_db_unavailable_when_no_db(monkeypatch):
     assert resp["error"]["data"]["code"] == "storage_locked"
 
 
-def test_session_delete_refuses_active_session(monkeypatch):
-    """Cannot delete a session currently bound to a live TUI session."""
+def test_session_delete_tears_down_a_live_session_then_deletes(monkeypatch):
+    """A conversation open in THIS process is stopped and closed by the delete itself (clients send only
+    the delete), instead of being refused and left to each client to tear down first."""
     called: list[str] = []
 
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
+            assert "live" not in server._sessions, "rows must go only after the live session is closed"
             called.append(sid)
             return True
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
-    monkeypatch.setitem(server._sessions, "live", {"session_key": "key-live"})
+    monkeypatch.setitem(server._sessions, "live", _session(session_key="key-live"))
     try:
         resp = server.handle_request(
             {
@@ -16044,9 +16049,8 @@ def test_session_delete_refuses_active_session(monkeypatch):
     finally:
         server._sessions.pop("live", None)
 
-    assert "error" in resp
-    assert resp["error"]["code"] == 4023
-    assert called == [], "delete_session must not be called for active sessions"
+    assert resp.get("result") == {"deleted": "key-live"}, resp
+    assert called == ["key-live"]
 
 
 def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
@@ -16076,6 +16080,9 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
 
 def test_session_delete_returns_4007_when_missing(monkeypatch):
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return []
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             return False
 
@@ -16091,6 +16098,9 @@ def test_session_delete_returns_4007_when_missing(monkeypatch):
 
 def test_session_delete_propagates_db_exception(monkeypatch):
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             raise RuntimeError("disk full")
 
@@ -16112,6 +16122,9 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     captured: dict = {}
 
     class _DB:
+        def get_session_delete_targets(self, sid):
+            return [sid]
+
         def delete_session(self, sid, sessions_dir=None, **_kw):
             captured["sid"] = sid
             captured["sessions_dir"] = sessions_dir
@@ -16338,6 +16351,9 @@ def test_session_delete_honors_params_profile_sessions_dir(monkeypatch, tmp_path
     class ProfileDB:
         def __init__(self, db_path=None):
             captured["db_path"] = db_path
+
+        def get_session_delete_targets(self, sid):
+            return [sid]
 
         def delete_session(self, sid, sessions_dir=None, **_kw):
             captured["sid"] = sid

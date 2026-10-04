@@ -438,18 +438,20 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     """Delete every session in ``body.ids`` in one transaction (POST: many
     clients refuse a DELETE body).
 
-    Per :meth:`SessionDB.delete_sessions`: unknown ids are skipped (``deleted``
-    reports what really happened), children are orphaned, active/archived rows
-    ARE deleted (hand-picked), on-disk cleanup is left to the next prune.
+    Same contract as the single delete, per conversation (see :func:`delete_session_endpoint`): unknown
+    ids are skipped (``deleted`` reports what really happened), active/archived rows ARE deleted
+    (hand-picked), transcript files are swept. A conversation another process has open, or that a turn
+    is still writing, is reported in ``skipped_active`` and stays listed.
     """
     # Hard cap so a runaway selection can't lock the writer for long.
     if len(body.ids) > 500:
         raise HTTPException(status_code=400, detail="ids must contain at most 500 entries")
     profile = destructive_profile(body.profile, "POST /api/sessions/bulk-delete")
-    skipped: list[str] = []  # rows a live turn/compression still owns; the UI must keep them listed
-    deleted = await asyncio.to_thread(_with_db, profile, lambda db: db.delete_sessions(
-        body.ids, exclude_active_write_guards=True, skipped_ids=skipped), read_only=False)
-    return {"ok": True, "deleted": deleted, "skipped_active": skipped}
+    import tui_gateway.server as gateway  # loaded at web-server startup; owns this process's live sessions
+
+    deleted, skipped = await asyncio.to_thread(_with_db, profile, lambda db: gateway._delete_conversations(
+        db, body.ids, home=_history_profile_home(profile)), read_only=False)
+    return {"ok": True, "deleted": len(deleted), "skipped_active": skipped}
 
 
 @manage_router.post("/api/sessions/import")
@@ -791,6 +793,11 @@ async def get_session_messages_around(
 
 @manage_router.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
+    """Delete a conversation, live state included: the server stops and closes any live session it holds
+    for it, removes every segment, and broadcasts ``session.deleted``. Clients send only this request.
+    409 when another process has it open or a turn is still writing it."""
+    import tui_gateway.server as gateway  # loaded at web-server startup; owns this process's live sessions
+
     def _delete(db):
         # Already-absent is an idempotent success: the desktop optimistically
         # removes the row and RESTORES it on any error, so a 404 resurrected
@@ -799,8 +806,8 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         if not sid:
             return {"ok": True, "already_absent": True}
         try:
-            db.delete_session(sid, sessions_dir=_session_files_dir(profile), exclude_active_write_guards=True)
-        except SessionActiveWriteGuardError as exc:
+            gateway._delete_conversation(db, sid, home=_history_profile_home(profile))
+        except SessionActiveWriteGuardError as exc:  # includes SessionOpenElsewhereError
             raise HTTPException(status_code=409, detail=str(exc))
         return {"ok": True}
 

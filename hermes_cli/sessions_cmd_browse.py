@@ -246,7 +246,7 @@ def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
     """Curses session browser with live search; returns the selected session ID, or None if cancelled.
 
     With *session_db*: shows lifecycle status / message count per row, and ``d`` (while the filter is
-    empty) prompts y/n and deletes via ``SessionDB.delete_session``.
+    empty) prompts y/n and deletes the conversation via ``hermes_cli.session_delete``.
     """
     if not sessions:
         print("No sessions found.")
@@ -254,13 +254,11 @@ def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
     _annotate_session_statuses(sessions, session_db)
 
     def _delete_session(session_id: str) -> bool:
+        from hermes_cli.session_delete import delete_stored_conversation
+        from hermes_cli.sessions_cmd import get_hermes_home
+
         try:
-            from hermes_cli.sessions_cmd import get_hermes_home
-            sessions_dir = get_hermes_home() / "sessions"
-        except Exception:
-            sessions_dir = None
-        try:
-            return bool(session_db.delete_session(session_id, sessions_dir=sessions_dir, exclude_active_write_guards=True))
+            return bool(delete_stored_conversation(session_db, session_id, home=get_hermes_home()))
         except SessionActiveWriteGuardError:
             raise  # the browser tells the user the session is busy instead of a generic failure
         except Exception:
