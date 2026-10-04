@@ -677,6 +677,73 @@ def _close_session_by_id(
     return _teardown_popped_session(session, end_reason=end_reason)
 
 
+# ── delete ────────────────────────────────────────────────────────────
+def _live_sessions_for_delete(ids, home) -> list[tuple[str, dict]]:
+    """Live records this process holds for any of *ids* (a conversation's segments, so a record whose key
+    compression rotated is still found) in profile *home*. A record without ``profile_home`` belongs to the
+    launch profile, which *home* names either as the import-time ``_hermes_home`` or the current
+    ``get_hermes_home()`` (they differ under a scoped home override)."""
+    wanted = {str(i) for i in ids if i}
+    home = Path(home).resolve()
+    launch = home in {Path(_hermes_home).resolve(), Path(get_hermes_home()).resolve()}
+
+    def _same_profile(session: dict) -> bool:
+        own = session.get("profile_home")
+        return Path(own).resolve() == home if own else launch
+
+    with _sessions_lock:
+        return [
+            (sid, session) for sid, session in list(_sessions.items())
+            if (_session_lookup_key(session, fallback=sid) in wanted or str(session.get("session_key") or "") in wanted)
+            and _same_profile(session)
+        ]
+
+
+def _teardown_for_delete(ids, home) -> list[str]:
+    """Stop and close every live session this process holds for the conversation, before its rows go: the
+    stop releases approvals, queued prompts, subagents and background review; the close joins the turn
+    thread and finalizes without persisting or committing memory (``SESSION_END_DELETED``). Returns the
+    closed runtime ids."""
+    closed = []
+    for sid, session in _live_sessions_for_delete(ids, home):
+        try:
+            _interrupt_session_turn(sid, session)
+        except Exception:
+            logger.warning("delete: interrupt of live session %s failed; closing anyway", sid, exc_info=True)
+        with _session_resume_lock:  # same ownership claim as session.close
+            popped = _pop_session_by_id(sid)
+        if _teardown_popped_session(popped, end_reason=SESSION_END_DELETED):
+            closed.append(sid)
+    return closed
+
+
+def _delete_conversation(db, session_id: str, *, home) -> list[str]:
+    """The one delete every entry point calls: tear down this process's live sessions for the conversation,
+    delete its rows (refused if another process has it open, see ``hermes_cli.session_delete``), and tell
+    every connected client. Returns the removed ids, ``[]`` when *session_id* is unknown."""
+    from hermes_cli.session_delete import delete_stored_conversation
+
+    closed = _teardown_for_delete(db.get_session_delete_targets(session_id), home)
+    ids = delete_stored_conversation(db, session_id, home=Path(home))
+    if ids:
+        _broadcast_global_event("session.deleted", {"stored_session_ids": ids, "runtime_session_ids": closed})
+    return ids
+
+
+def _delete_conversations(db, session_ids, *, home) -> tuple[list[str], list[str]]:
+    """Bulk :func:`_delete_conversation`: each conversation torn down on its own, rows removed in one
+    transaction. Returns ``(deleted, skipped)`` selected ids."""
+    from hermes_cli.session_delete import delete_stored_conversations
+
+    targets = {sid: db.get_session_delete_targets(sid) for sid in dict.fromkeys(session_ids) if sid}
+    closed = [rt for ids in targets.values() for rt in _teardown_for_delete(ids, home)]
+    deleted, skipped = delete_stored_conversations(db, list(targets), home=Path(home))
+    if deleted:
+        _broadcast_global_event("session.deleted", {
+            "stored_session_ids": [i for sid in deleted for i in targets[sid]], "runtime_session_ids": closed})
+    return deleted, skipped
+
+
 def _ws_session_is_detached(session: dict | None) -> bool:
     """True if a live session is still bound to the disconnected-WS sentinel."""
     return bool(session and not session.get("_finalized") and session.get("transport") is _detached_ws_transport)

@@ -4697,6 +4697,11 @@ export interface SessionReclaimedPayload {
   stored_session_id: string
   reason: string
 }
+/** ``session_lifecycle._delete_conversation`` / ``_delete_conversations`` (broadcast). Every client drops its state for the conversation(s): the backend already closed the live sessions (``runtime_session_ids``) and removed every stored row (``stored_session_ids``: all compression segments and delegate children). */
+export interface SessionDeletedPayload {
+  stored_session_ids: string[]
+  runtime_session_ids: string[]
+}
 /** ``session_lifecycle._announce_cancelled_gateway_approvals`` (broadcast). One frame for every pending approval dropped by an interrupt / reap / teardown (#106678) — the deny-resolve is silent without it, so a reconnecting client's prompt looks lost rather than cancelled. ``cancelled_count`` is the number of dropped entries; ``request_ids`` omits empty/missing ids, so the two can disagree when an entry has no request_id. */
 export interface ApprovalCancelledPayload {
   session_id: string
@@ -5782,6 +5787,8 @@ export interface BackendGatewayEventMap {
   'review.summary': ReviewSummaryPayload
   /** Persisted goal / loop / heartbeat state changed. */
   'session.control.update': SessionControlUpdatePayload
+  /** A conversation was deleted; drop every trace of it. */
+  'session.deleted': SessionDeletedPayload
   /** Live session settings snapshot (``server._session_info``); also the ``info`` of create/resume/activate. */
   'session.info': SessionLiveInfo
   /** The backend reclaimed a live session out from under its clients. */
@@ -5887,6 +5894,7 @@ export const GATEWAY_EVENT_TYPES = [
   'request.cancel',
   'review.summary',
   'session.control.update',
+  'session.deleted',
   'session.info',
   'session.reclaimed',
   'session.resume_progress',

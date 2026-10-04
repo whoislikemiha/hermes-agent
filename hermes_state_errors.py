@@ -176,6 +176,13 @@ class SessionActiveWriteGuardError(RuntimeError):
     """Raised when an active turn lease or compression lock rejects session deletion."""
 
 
+class SessionOpenElsewhereError(SessionActiveWriteGuardError):
+    """Raised when deletion is refused because another Hermes process has the conversation open (the
+    active-session registry names a live owner). Only the owner can tear its live session down, so the
+    delete must not remove the rows out from under it. Subclasses the write-guard refusal so every
+    delete caller maps both to the same "cannot delete an active session" answer."""
+
+
 class StateDbReplacedError(RuntimeError):
     """The state.db path no longer names the file this SessionDB opened
     (out-of-band cp/mv/restore). In-place FTS repair and fail-open trigger

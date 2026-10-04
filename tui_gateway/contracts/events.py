@@ -397,6 +397,18 @@ class SessionReclaimedPayload(Payload):
 event("session.reclaimed", SessionReclaimedPayload, doc="The backend reclaimed a live session out from under its clients.")
 
 
+class SessionDeletedPayload(Payload):
+    """``session_lifecycle._delete_conversation`` / ``_delete_conversations`` (broadcast). Every client drops
+    its state for the conversation(s): the backend already closed the live sessions (``runtime_session_ids``)
+    and removed every stored row (``stored_session_ids``: all compression segments and delegate children)."""
+
+    stored_session_ids: list[str]
+    runtime_session_ids: list[str]
+
+
+event("session.deleted", SessionDeletedPayload, doc="A conversation was deleted; drop every trace of it.")
+
+
 class ApprovalCancelledPayload(Payload):
     """``session_lifecycle._announce_cancelled_gateway_approvals`` (broadcast).
 

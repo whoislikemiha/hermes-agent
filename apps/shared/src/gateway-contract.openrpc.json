@@ -30170,6 +30170,32 @@
         "title": "SessionDeleteResult",
         "type": "object"
       },
+      "SessionDeletedPayload": {
+        "additionalProperties": false,
+        "description": "``session_lifecycle._delete_conversation`` / ``_delete_conversations`` (broadcast). Every client drops\nits state for the conversation(s): the backend already closed the live sessions (``runtime_session_ids``)\nand removed every stored row (``stored_session_ids``: all compression segments and delegate children).",
+        "properties": {
+          "stored_session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stored Session Ids",
+            "type": "array"
+          },
+          "runtime_session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtime Session Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stored_session_ids",
+          "runtime_session_ids"
+        ],
+        "title": "SessionDeletedPayload",
+        "type": "object"
+      },
       "SessionEventsSinceParams": {
         "additionalProperties": false,
         "properties": {
@@ -39936,6 +39962,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/SessionControlUpdatePayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session.deleted",
+      "summary": "A conversation was deleted; drop every trace of it.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/SessionDeletedPayload"
           }
         }
       ]
