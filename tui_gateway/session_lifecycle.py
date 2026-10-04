@@ -58,6 +58,9 @@ def _notify_session_boundary(event_type: str, session_id: str | None, platform: 
 
 _SESSION_OWNERSHIP_UNAVAILABLE = "Hermes could not safely reserve this session. Try again."
 _AUTOMATIC_SESSION_END_REASONS = frozenset({"ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
+# The user deleted the conversation: its rows are removed right after teardown, so finalize must not write the
+# transcript back or hand it to the memory provider.
+SESSION_END_DELETED = "deleted"
 
 
 def _lease_metadata(live_session_id: str) -> dict:
@@ -373,7 +376,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     # Persist via ``_persist_session``'s marker-based dedup (gateway-shutdown flush contract). Do NOT pass
     # ``conversation_history``: ``session["history"]`` and ``_session_messages`` alias the SAME list after a turn, so
     # the flush would treat every message as durable and skip it — data loss when finalize is the sole persist path.
-    if hasattr(agent, "_persist_session") and (snapshot := getattr(agent, "_session_messages", None)):
+    deleting = end_reason == SESSION_END_DELETED
+    if not deleting and hasattr(agent, "_persist_session") and (snapshot := getattr(agent, "_session_messages", None)):
         with contextlib.suppress(Exception):
             agent._persist_session(snapshot)
     # interrupted=True so crash-recovery plugins can flush state (mirrors cli.py atexit). The end-of-session
@@ -389,7 +393,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                     "on_session_end", completed=False, interrupted=True,
                     session_id=getattr(agent, "session_id", None) or session.get("session_key", ""),
                     model=getattr(agent, "model", "unknown"), platform=getattr(agent, "platform", None) or "tui")
-        if agent is not None and history and hasattr(agent, "commit_memory_session"):
+        if not deleting and agent is not None and history and hasattr(agent, "commit_memory_session"):
             with contextlib.suppress(Exception):
                 agent.commit_memory_session(history)
 

@@ -4953,6 +4953,28 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_finalize_for_delete_skips_transcript_persist_and_memory_commit(monkeypatch):
+    """A deleted conversation's rows go right after teardown: finalize must not write the transcript back
+    or hand it to the memory provider. The finalize hook still fires (plugins see the session end)."""
+    calls = {"hooks": [], "persisted": False, "committed": False}
+
+    agent = types.SimpleNamespace(session_id="session-key", _session_messages=[{"role": "user"}])
+    agent._persist_session = lambda _snapshot: calls.__setitem__("persisted", True)
+    agent.commit_memory_session = lambda _history: calls.__setitem__("committed", True)
+    session = _session(agent=agent, history=[{"role": "user", "content": "hello"}])
+    monkeypatch.setattr(
+        server,
+        "_notify_session_boundary",
+        lambda event, session_id, *_args: calls["hooks"].append((event, session_id)),
+    )
+
+    server._finalize_session(session, end_reason="deleted")
+
+    assert calls["persisted"] is False
+    assert calls["committed"] is False
+    assert ("on_session_finalize", "session-key") in calls["hooks"]
+
+
 def test_session_close_releases_resume_lock_before_slow_teardown(monkeypatch):
     """One slow session finalizer must not stall unrelated session.resume RPCs."""
     teardown_started = threading.Event()
