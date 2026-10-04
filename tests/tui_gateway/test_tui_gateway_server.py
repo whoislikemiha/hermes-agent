@@ -14545,6 +14545,31 @@ def test_interrupt_drops_queued_prompt_for_session():
         server._sessions.pop("sid", None)
 
 
+def test_interrupt_does_not_wait_on_or_report_a_failed_agent_build(monkeypatch):
+    """Stop needs only the session record: a failed build (e.g. no provider credentials when the
+    conversation was opened) must not turn Stop, and the stop-then-delete flow, into that build error."""
+    session = _session(running=False)
+    session["agent"] = None
+    ready = threading.Event()
+    ready.set()
+    session["agent_ready"] = ready
+    session["agent_error"] = "No Anthropic credentials found."
+    server._sessions["sid"] = session
+    monkeypatch.setattr(
+        server, "_start_agent_build",
+        lambda *_a, **_k: pytest.fail("session.interrupt must not start an agent build"))
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+        )
+
+        assert resp.get("result", {}).get("status") == "interrupted", f"got: {resp}"
+        assert session["_turn_cancel_requested"] is True
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_interrupt_before_agent_ready_prevents_late_turn_start(monkeypatch):
     """Stop during lazy agent startup must not start the turn after init finishes."""
     threads = []
