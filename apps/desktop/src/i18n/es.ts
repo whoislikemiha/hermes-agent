@@ -2613,6 +2613,7 @@ export const esOverrides = {
       unarchive: 'Desarchivar',
       deletePermanently: 'Eliminar permanentemente',
       messages: count => `${count} ${count === 1 ? 'mensaje' : 'mensajes'}`,
+      turns: count => `${count} ${count === 1 ? 'turno' : 'turnos'}`,
       restored: 'Restaurado',
       deleteConfirm: title => `¿Eliminar permanentemente "${title}"? Esto no se puede deshacer.`,
       autoArchiveTitle: 'Archivar automáticamente los chats inactivos',
@@ -4105,6 +4106,7 @@ export const esOverrides = {
     loadCount: step => `Cargar ${step} más`,
     messageCount: (count: number) => `${count} ${count === 1 ? 'mensaje' : 'mensajes'}`,
     toolCallCount: (count: number) => `${count} ${count === 1 ? 'llamada a herramienta' : 'llamadas a herramientas'}`,
+    turnCount: (count: number) => `${count} ${count === 1 ? 'turno' : 'turnos'}`,
     row: {
       pin: 'Fijar',
       unpin: 'Desfijar',

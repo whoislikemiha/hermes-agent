@@ -492,7 +492,7 @@ def get_profiles_sessions(
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.
-                compact_rows=not full, include_pinned=True, **scoped)
+                compact_rows=not full, include_pinned=True, include_turn_counts=True, **scoped)
             totals[name] = db.session_count(exclude_children=True, **scoped)
             merged.extend(_tag_rows(rows, name, now))
         _read_profile_db(name, home, errors, _read)
@@ -549,7 +549,7 @@ def get_profiles_sessions_sidebar(
             source=source, exclude_sources=exclude or None, limit=cap[key], offset=0,
             min_message_count=1, include_archived=False, archived_only=False,
             order_by_last_active=True, compact_rows=True, include_pinned=True,
-            include_subagents=include_subagents)
+            include_subagents=include_subagents, include_turn_counts=True)
 
     def _build_slices(db, cache_key, recents_subagents):
         # ``usage`` is aggregated in SQL rather than over the recents window: the window is a

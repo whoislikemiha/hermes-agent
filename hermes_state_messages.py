@@ -1365,6 +1365,28 @@ class SessionMessagesMixin:
             f" WHERE session_id = ?{_DISPLAY_ACTIVE_CLAUSE}{DISPLAY_VISIBLE_SQL})", (session_id,))
         return int(row[0])
 
+    def turn_counts(self, session_ids: List[str]) -> Dict[str, int]:
+        """``{session_id: n}``: prompts the user typed, as a display read paints them.
+
+        ``message_count`` counts every stored row (each tool call and tool result too), so a
+        ten-prompt chat can read as 150 "messages". A turn is a visible ``role='user'`` row with
+        no ``display_kind``: backend notices (process/delegation completions, model switches,
+        auto-continue) and mid-turn steers are typed, so they are not counted. Carried
+        compaction copies share their original's ``display_order`` and count once; legacy
+        rows the display read has not backfilled yet (NULL order) count one each.
+        One grouped query per chunk; ids with no turns map to 0."""
+        ids = list(dict.fromkeys(sid for sid in (session_ids or []) if sid))
+        counts = dict.fromkeys(ids, 0)
+        for start in range(0, len(ids), 500):  # under SQLITE_MAX_VARIABLE_NUMBER on old builds
+            chunk = ids[start:start + 500]
+            rows = self._read_all(
+                "SELECT session_id, COUNT(DISTINCT COALESCE(display_order, -id)) FROM messages"
+                f" WHERE session_id IN ({','.join('?' * len(chunk))})"
+                f" AND role = 'user' AND display_kind IS NULL{_DISPLAY_ACTIVE_CLAUSE}{DISPLAY_VISIBLE_SQL}"
+                " GROUP BY session_id", chunk)
+            counts.update({row[0]: int(row[1]) for row in rows})
+        return counts
+
     def _display_messages_from_conn(self, conn, session_id: str) -> Optional[List[Dict[str, Any]]]:
         """Exact display snapshot on an already-held transaction; None means fail closed."""
         if conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone() is None:

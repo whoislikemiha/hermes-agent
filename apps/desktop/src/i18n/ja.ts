@@ -1505,6 +1505,7 @@ export const ja = defineLocale({
       unarchive: 'アーカイブを解除',
       deletePermanently: '完全に削除',
       messages: count => `${count} 件のメッセージ`,
+      turns: count => `${count} ターン`,
       restored: '復元しました',
       deleteConfirm: title => `"${title}" を完全に削除しますか？この操作は元に戻せません。`,
       autoArchiveTitle: '古いチャットを自動アーカイブ',
@@ -2593,6 +2594,7 @@ export const ja = defineLocale({
     loadCount: step => `さらに ${step} 件を読み込む`,
     messageCount: count => `${count} 件のメッセージ`,
     toolCallCount: count => `${count} 件のツール呼び出し`,
+    turnCount: count => `${count} ターン`,
     row: {
       pin: 'ピン留め',
       unpin: 'ピン留めを解除',

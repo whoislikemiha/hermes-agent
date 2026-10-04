@@ -827,6 +827,7 @@ export const arSettings = {
       unarchive: 'إلغاء الأرشفة',
       deletePermanently: 'حذف نهائي',
       messages: count => `${count} ${count === 1 ? 'رسالة' : 'رسائل'}`,
+      turns: count => `${count} ${count === 1 ? 'دور' : 'أدوار'}`,
       restored: 'تمت الاستعادة',
       deleteConfirm: title => `حذف "${title}" نهائياً؟ لا يمكن التراجع عن هذا.`,
       defaultDirTitle: 'مجلد المشروع الافتراضي',

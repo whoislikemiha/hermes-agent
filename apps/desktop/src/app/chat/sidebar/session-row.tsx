@@ -22,6 +22,7 @@ import { middleClickHandlers } from '@/lib/middle-click'
 import { displayModelName } from '@/lib/model-status-label'
 import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
+import { sessionSizeLabel } from '@/lib/session-size'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -156,7 +157,8 @@ function SidebarSessionRowImpl({
 
   const details = sessionRowDetails(session, {
     messageCount: fmt.messageCount,
-    toolCallCount: fmt.toolCallCount
+    toolCallCount: fmt.toolCallCount,
+    turnCount: fmt.turnCount
   })
 
   const timestamp = session.last_active || session.started_at
@@ -281,7 +283,7 @@ function SidebarSessionRowImpl({
   // as separate spans with a flex gap — a joined string can't put real space
   // between them (HTML collapses runs of whitespace to one).
   const model = card && session.model ? displayModelName(session.model) : ''
-  const size = card && session.message_count > 0 ? r.messageCount(session.message_count) : ''
+  const size = card ? (sessionSizeLabel(session, { messageCount: r.messageCount, turnCount: fmt.turnCount }) ?? '') : ''
   // Live plan progress ("3/7"), far right of the footer. A selector keyed to
   // this row: only rows whose own fraction changes repaint on todo events.
   const todoProgress = useStoreSelector($todoProgressBySession, progress => (card ? progress[session.id] : undefined))

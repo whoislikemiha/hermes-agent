@@ -1300,13 +1300,15 @@ class SessionSessionsMixin:
         order_by_last_active: bool = False, include_archived: bool = False, archived_only: bool = False,
         id_query: str = None, search_query: str = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str = None, include_hidden: bool = False,
-        include_subagents: bool = False,
+        include_subagents: bool = False, include_turn_counts: bool = False,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
         ``include_pinned`` back-fills pins the page missed, still obeying the other
         filters except archived: a pin is an explicit keep, so a pinned row stamped
-        archived must still return."""
+        archived must still return. ``include_turn_counts`` adds ``turn_count`` (see
+        :meth:`turn_counts`) for the row's surfaced id, the compression tip like
+        ``message_count``; opt-in because it reads each listed session's messages."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
@@ -1411,6 +1413,10 @@ class SessionSessionsMixin:
         # last_read_at is lineage-stamped, so root and tip watermarks agree.
         for s in sessions:
             s["unread"] = self.session_unread(s)
+        if include_turn_counts:
+            turns = self.turn_counts([s["id"] for s in sessions])
+            for s in sessions:
+                s["turn_count"] = turns.get(s["id"], 0)
         return sessions
 
     def session_lifecycle_statuses(self, session_ids: List[str]) -> Dict[str, str]:

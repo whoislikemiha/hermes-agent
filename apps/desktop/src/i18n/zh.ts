@@ -2122,6 +2122,7 @@ export const zh = defineLocale({
       unarchive: '取消归档',
       deletePermanently: '永久删除',
       messages: count => `${count} 条消息`,
+      turns: count => `${count} 轮`,
       restored: '已恢复',
       deleteConfirm: title => `永久删除“${title}”？此操作无法撤销。`,
       autoArchiveTitle: '自动归档闲置会话',
@@ -3449,6 +3450,7 @@ export const zh = defineLocale({
     loadCount: step => `再加载 ${step} 个`,
     messageCount: count => `${count} 条消息`,
     toolCallCount: count => `${count} 次工具调用`,
+    turnCount: count => `${count} 轮`,
     row: {
       pin: '置顶',
       unpin: '取消置顶',

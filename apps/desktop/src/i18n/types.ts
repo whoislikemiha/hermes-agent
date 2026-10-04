@@ -1897,6 +1897,7 @@ export interface Translations {
       unarchive: string
       deletePermanently: string
       messages: (count: number) => string
+      turns: (count: number) => string
       restored: string
       deleteConfirm: (title: string) => string
       autoArchiveTitle: string
@@ -3103,6 +3104,7 @@ export interface Translations {
     loadCount: (step: number) => string
     messageCount: (count: number) => string
     toolCallCount: (count: number) => string
+    turnCount: (count: number) => string
     row: {
       pin: string
       unpin: string
