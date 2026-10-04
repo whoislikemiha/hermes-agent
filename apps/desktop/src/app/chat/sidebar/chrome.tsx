@@ -118,16 +118,16 @@ export function SidebarRowNest({ className, ...props }: React.ComponentProps<'di
  * the session list. Caption-shaped — a small label plus a hairline — so it
  * groups sessions by recency without adding a level of indentation. When
  * `toggle` is set the whole caption collapses the sessions beneath it, same
- * gesture as a repo header (the hover caret is the tell).
+ * gesture as a repo header (the hover caret is the tell). It carries no "+":
+ * a date names when sessions happened, not a place to create one, so new
+ * sessions start from the section header or a project/worktree header.
  */
 export function SidebarDateDivider({
-  action,
   className,
   label,
   toggle,
   ...props
 }: React.ComponentProps<'div'> & {
-  action?: React.ReactNode
   label: string
   toggle?: { ariaLabel: string; onToggle: () => void; open: boolean }
 }) {
@@ -140,8 +140,8 @@ export function SidebarDateDivider({
   const rule = <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-(--ui-stroke-tertiary)" />
 
   return (
-    // group/workspace: a divider heads a group the same way a repo header does,
-    // so it borrows the header's hover-revealed "+" verbatim.
+    // group/workspace: the hover-revealed caret keys off the same group as a
+    // repo header's controls.
     <div className={cn('group/workspace flex select-none items-center gap-2 px-2 pb-0.5 pt-2', className)} {...props}>
       {toggle ? (
         <button
@@ -164,7 +164,6 @@ export function SidebarDateDivider({
           {rule}
         </>
       )}
-      {action}
     </div>
   )
 }
